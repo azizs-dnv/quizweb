@@ -410,8 +410,9 @@ def _room_state(code: str, token: str | None = None) -> dict[str, Any]:
         "server_time": time.time(),
         "leaderboard": board,
     }
-    if token is None:
+    if token is None or room["status"] == "waiting":
         result["participants"] = board
+    if token is None:
         return result
 
     with _database() as connection:

@@ -64,6 +64,7 @@ class QuizRoomFlowTest(unittest.TestCase):
         code = room.json()["code"]
         joined = self.client.post("/api/student/join", json={"code": code, "name": "Alex Morgan"})
         self.assertEqual(joined.status_code, 201, joined.text)
+        self.assertEqual(joined.json()["participants"][0]["name"], "Alex Morgan")
         token = joined.json()["student"]["token"]
 
         started = self.client.post(f"/api/teacher/rooms/{code}/start")
