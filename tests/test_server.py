@@ -3,6 +3,7 @@ import json
 import secrets
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -138,6 +139,70 @@ class QuizRoomFlowTest(unittest.TestCase):
         slower_points = server._points_for_correct_answer(30, 60)
         self.assertGreater(fast_points, slower_points)
         self.assertEqual(server._points_for_correct_answer(60, 60), 300)
+
+    def test_expired_room_finishes_and_completes_students_without_teacher_request(self):
+        self.client.post("/api/auth/login", json={"username": "teacher", "password": "correct-horse-battery"})
+        quiz = self.client.post("/api/teacher/quizzes", json={
+            "title": "Timed quiz",
+            "duration_minutes": 1,
+            "questions": [{"text": "Question", "options": ["A", "B"], "correct_index": 0}],
+        }).json()
+        code = self.client.post(f"/api/teacher/rooms/{quiz['id']}").json()["code"]
+        student = self.client.post("/api/student/join", json={"code": code, "name": "Taylor Student"}).json()
+        token = student["student"]["token"]
+        self.client.post(f"/api/teacher/rooms/{code}/start")
+        with server._database() as connection:
+            connection.execute("UPDATE rooms SET deadline = ? WHERE code = ?", (time.time() - 1, code))
+
+        server._finish_expired_rooms()
+
+        with server._database() as connection:
+            room_status = connection.execute("SELECT status FROM rooms WHERE code = ?", (code,)).fetchone()[0]
+            student_status = connection.execute("SELECT status FROM participants WHERE token = ?", (token,)).fetchone()[0]
+        self.assertEqual(room_status, "finished")
+        self.assertEqual(student_status, "completed")
+
+    def test_late_student_can_join_running_quiz_but_gets_fewer_points(self):
+        self.client.post("/api/auth/login", json={"username": "teacher", "password": "correct-horse-battery"})
+        quiz = self.client.post("/api/teacher/quizzes", json={
+            "title": "Late join test",
+            "duration_minutes": 10,
+            "questions": [{"text": "Choose A", "options": ["A", "B"], "correct_index": 0}],
+        }).json()
+        code = self.client.post(f"/api/teacher/rooms/{quiz['id']}").json()["code"]
+        early_student = self.client.post("/api/student/join", json={"code": code, "name": "Early Student"}).json()
+        self.client.post(f"/api/teacher/rooms/{code}/start")
+        early_attempt = self.client.post(
+            "/api/student/resume", json={"token": early_student["student"]["token"]}
+        ).json()
+        early_question = early_attempt["questions"][0]
+        early_answer = self.client.post("/api/student/answer", json={
+            "token": early_student["student"]["token"],
+            "question_id": early_question["id"],
+            "option_index": early_question["options"].index("A"),
+        }).json()
+
+        late_start = time.time() - 300
+        with server._database() as connection:
+            connection.execute(
+                "UPDATE rooms SET started_at = ?, deadline = ? WHERE code = ?",
+                (late_start, time.time() + 300, code),
+            )
+        late_student = self.client.post("/api/student/join", json={"code": code, "name": "Late Student"})
+        self.assertEqual(late_student.status_code, 201, late_student.text)
+        self.assertEqual(late_student.json()["student"]["status"], "in_progress")
+        late_attempt = self.client.post(
+            "/api/student/resume", json={"token": late_student.json()["student"]["token"]}
+        ).json()
+        late_question = late_attempt["questions"][0]
+        late_answer = self.client.post("/api/student/answer", json={
+            "token": late_student.json()["student"]["token"],
+            "question_id": late_question["id"],
+            "option_index": late_question["options"].index("A"),
+        }).json()
+        self.assertTrue(late_answer["correct"])
+        self.assertGreater(early_answer["points"], late_answer["points"])
+        self.assertLess(late_answer["points"], early_answer["points"] * 0.6)
 
     def test_existing_database_is_migrated_without_losing_rooms(self):
         legacy_database = self.root / "legacy.sqlite3"

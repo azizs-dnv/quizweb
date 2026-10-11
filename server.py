@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,22 @@ DEFAULT_TEACHER_ID = "default"
 _REGISTRATION_LOCK = threading.Lock()
 QUIZ_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="QuizRoom", version="1.0.0")
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    expiration_task = asyncio.create_task(_room_expiration_loop())
+    application.state.room_expiration_task = expiration_task
+    try:
+        yield
+    finally:
+        expiration_task.cancel()
+        application.state.room_expiration_task = None
+        try:
+            await expiration_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="QuizRoom", version="1.0.0", lifespan=lifespan)
 
 
 class LoginBody(BaseModel):
@@ -133,6 +148,34 @@ def _init_database() -> None:
 
 
 _init_database()
+
+
+def _finish_expired_rooms(now: float | None = None) -> int:
+    current_time = time.time() if now is None else now
+    with _database() as connection:
+        expired_rooms = connection.execute(
+            "SELECT code FROM rooms WHERE status = 'running' AND deadline <= ?",
+            (current_time,),
+        ).fetchall()
+        room_codes = [row["code"] for row in expired_rooms]
+        if not room_codes:
+            return 0
+        connection.executemany(
+            "UPDATE rooms SET status = 'finished' WHERE code = ? AND status = 'running'",
+            ((code,) for code in room_codes),
+        )
+        connection.executemany(
+            "UPDATE participants SET status = 'completed', finished_at = COALESCE(finished_at, ?) "
+            "WHERE room_code = ? AND status = 'in_progress'",
+            ((current_time, code) for code in room_codes),
+        )
+    return len(room_codes)
+
+
+async def _room_expiration_loop() -> None:
+    while True:
+        await asyncio.to_thread(_finish_expired_rooms)
+        await asyncio.sleep(1)
 
 
 def _read_auth() -> dict[str, str] | None:
@@ -324,16 +367,8 @@ def _room_row(code: str) -> sqlite3.Row:
     return row
 
 
-def _refresh_room(code: str) -> None:
-    with _database() as connection:
-        room = connection.execute("SELECT * FROM rooms WHERE code = ?", (code,)).fetchone()
-        if room and room["status"] == "running" and room["deadline"] <= time.time():
-            connection.execute("UPDATE rooms SET status = 'finished' WHERE code = ?", (code,))
-            connection.execute(
-                "UPDATE participants SET status = 'completed', finished_at = COALESCE(finished_at, ?) "
-                "WHERE room_code = ? AND status != 'blocked'",
-                (time.time(), code),
-            )
+def _refresh_room() -> None:
+    _finish_expired_rooms()
 
 
 def _ranked_participants(code: str) -> list[dict[str, Any]]:
@@ -363,7 +398,7 @@ def _ranked_participants(code: str) -> list[dict[str, Any]]:
 
 
 def _room_state(code: str, token: str | None = None) -> dict[str, Any]:
-    _refresh_room(code)
+    _refresh_room()
     room = _room_row(code)
     quiz = json.loads(room["quiz_json"])
     board = _ranked_participants(code)
@@ -739,8 +774,9 @@ def join_room(body: JoinBody) -> dict[str, Any]:
     name = " ".join(body.name.split())
     if not name or len(name) > 60:
         raise HTTPException(status_code=422, detail="Enter a name (up to 60 characters).")
+    _refresh_room()
     room = _room_row(code)
-    if room["status"] != "waiting":
+    if room["status"] not in {"waiting", "running"}:
         raise HTTPException(status_code=409, detail="This room is no longer accepting participants.")
     quiz = json.loads(room["quiz_json"])
     questions = quiz["questions"]
@@ -763,11 +799,12 @@ def join_room(body: JoinBody) -> dict[str, Any]:
             option_orders[question["id"]] = indices
     token = secrets.token_urlsafe(32)
     now = time.time()
+    participant_status = "in_progress" if room["status"] == "running" else "waiting"
     with _database() as connection:
         connection.execute(
-            "INSERT INTO participants(token, room_code, name, question_order, option_orders, joined_at, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (token, code, name, json.dumps(question_order), json.dumps(option_orders), now, now),
+            "INSERT INTO participants(token, room_code, name, question_order, option_orders, status, joined_at, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (token, code, name, json.dumps(question_order), json.dumps(option_orders), participant_status, now, now),
         )
     return _room_state(code, token)
 
@@ -811,8 +848,15 @@ def submit_answer(body: AnswerBody) -> dict[str, Any]:
         now = time.time()
         question_times = json.loads(student["question_times"])
         answered_at = question_times.get(body.question_id, now)
-        expected_seconds = quiz["duration_minutes"] * 60 / len(quiz["questions"])
-        earned = _points_for_correct_answer(now - answered_at, expected_seconds) if correct else 0
+        total_seconds = quiz["duration_minutes"] * 60
+        expected_seconds = total_seconds / len(quiz["questions"])
+        late_seconds = max(0.0, student["joined_at"] - room["started_at"])
+        remaining_time_ratio = max(0.0, 1 - late_seconds / total_seconds)
+        earned = (
+            round(_points_for_correct_answer(now - answered_at, expected_seconds) * remaining_time_ratio)
+            if correct
+            else 0
+        )
         answers[body.question_id] = {"answer": saved_answer, "correct": correct, "points": earned}
         question_times.pop(body.question_id, None)
         next_correct_count = student["correct_count"] + int(correct)

@@ -11,6 +11,8 @@ The project uses Python, FastAPI, WebSockets, SQLite, and plain HTML/CSS/JavaScr
 - Separate teacher accounts with passwords stored as `scrypt` hashes and private quiz folders.
 - Create, edit, import, and delete single-choice, multiple-choice, open-text, and matching-pairs quizzes.
 - Waiting rooms with six-digit join codes and a live participant list.
+- Automatic room completion when the shared deadline expires, even if the teacher is away.
+- Late students can join a running room until the deadline; their points scale down with the time already elapsed.
 - A randomized question and answer-option order for each student.
 - A shared room timer, per-question speed points, a live leaderboard, and grades from 0 to 10.
 - Server-side attempt saving and resume after a page refresh.
@@ -95,8 +97,9 @@ Press `Ctrl+C` in the terminal to stop the server. To start it again, activate `
 4. Select **New quiz**, then enter a title and total duration.
 5. Add questions and answer options, and mark the correct option. Every choice question needs at least two options.
 6. Save the quiz and select **Launch** next to it.
-7. Share the room code with the class. When students have joined, select **Start quiz**.
-8. Monitor participant statuses and the leaderboard. Download the TXT results when the quiz ends.
+7. Share the room code with the class. Select **Start quiz** when ready. Students can also join after the quiz starts, until the deadline.
+8. The quiz ends automatically when its total timer reaches zero. The teacher can also end it manually at any time.
+9. Monitor participant statuses and the leaderboard. Download the TXT results when the quiz ends.
 
 Students select **Student** on the home page, then enter their name and the room code. The teacher must start the room before the quiz begins. If a student refreshes the page, select **Resume** on the home page to continue; saved answers and points remain on the server.
 
@@ -107,7 +110,7 @@ Students select **Student** on the home page, then enter their name and the room
 - **Open text:** the teacher enters an expected answer. Automatic checking ignores letter case and repeated or leading/trailing spaces, but otherwise requires an exact match.
 - **Matching pairs:** the teacher creates 2–12 unique pairs. Each student receives a randomized left and right column and must match every item correctly.
 
-Incorrect answers earn 0 points. A correct answer earns from 300 to 1,000 points based on how quickly it is submitted after that question appears. The expected response window is the total quiz duration divided by the number of questions; answering faster earns more points. The overall quiz timer remains shared, with no separate per-question deadline.
+Incorrect answers earn 0 points. A correct answer earns from 300 to 1,000 points based on how quickly it is submitted after that question appears. The expected response window is the total quiz duration divided by the number of questions; answering faster earns more points. Late joiners receive an additional multiplier based on the fraction of total quiz time remaining when they join. The overall quiz timer remains shared, with no separate per-question deadline.
 
 ### Import and edit quizzes
 
