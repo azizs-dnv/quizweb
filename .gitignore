@@ -6,3 +6,4 @@ quizroom.db
 quizroom.db-shm
 quizroom.db-wal
 tests/quizzes/*.json
+teacher_data/

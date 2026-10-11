@@ -8,8 +8,8 @@ The project uses Python, FastAPI, WebSockets, SQLite, and plain HTML/CSS/JavaScr
 
 ## Features
 
-- Teacher sign-in with a password stored as a `scrypt` hash.
-- Create and delete quizzes with single-choice, multiple-choice, open-text, and matching-pairs questions.
+- Separate teacher accounts with passwords stored as `scrypt` hashes and private quiz folders.
+- Create, edit, import, and delete single-choice, multiple-choice, open-text, and matching-pairs quizzes.
 - Waiting rooms with six-digit join codes and a live participant list.
 - A randomized question and answer-option order for each student.
 - A shared room timer, per-question speed points, a live leaderboard, and grades from 0 to 10.
@@ -91,11 +91,12 @@ Press `Ctrl+C` in the terminal to stop the server. To start it again, activate `
 
 1. Open the app on the teacher computer and select **Teacher**.
 2. Sign in with the account created by `init_admin.py`.
-3. Select **New quiz**, then enter a title and total duration.
-4. Add questions and answer options, and mark the correct option. Every question needs at least two options.
-5. Save the quiz and select **Launch** next to it.
-6. Share the room code with the class. When students have joined, select **Start quiz**.
-7. Monitor participant statuses and the leaderboard. Download the TXT results when the quiz ends.
+3. To add another teacher, sign out, select **Teacher**, choose **Create a separate teacher account**, and register a unique username and password. Each teacher has private quizzes and rooms.
+4. Select **New quiz**, then enter a title and total duration.
+5. Add questions and answer options, and mark the correct option. Every choice question needs at least two options.
+6. Save the quiz and select **Launch** next to it.
+7. Share the room code with the class. When students have joined, select **Start quiz**.
+8. Monitor participant statuses and the leaderboard. Download the TXT results when the quiz ends.
 
 Students select **Student** on the home page, then enter their name and the room code. The teacher must start the room before the quiz begins. If a student refreshes the page, select **Resume** on the home page to continue; saved answers and points remain on the server.
 
@@ -107,6 +108,18 @@ Students select **Student** on the home page, then enter their name and the room
 - **Matching pairs:** the teacher creates 2–12 unique pairs. Each student receives a randomized left and right column and must match every item correctly.
 
 Incorrect answers earn 0 points. A correct answer earns from 300 to 1,000 points based on how quickly it is submitted after that question appears. The expected response window is the total quiz duration divided by the number of questions; answering faster earns more points. The overall quiz timer remains shared, with no separate per-question deadline.
+
+### Import and edit quizzes
+
+Select **Import JSON** on the teacher dashboard to choose one or more `.json` files. Each file can contain one quiz, an array of quizzes, or an object with a `quizzes` array. Imported quiz data uses the same question structure supported by the builder; quizzes without a question `type` are treated as single-choice for compatibility.
+
+Select **Edit** next to a quiz to change its title, duration, questions, and answer keys. A quiz cannot be edited while its room is waiting or running. Finish the room first; completed rooms retain their saved quiz snapshot and results.
+
+### Teacher quiz storage
+
+- The teacher created by `init_admin.py` is the default account. Its existing quizzes remain in `tests/quizzes/`.
+- Every additional teacher has an account record at `teacher_data/<teacher-id>/account.json` and quizzes at `teacher_data/<teacher-id>/quizzes/`.
+- All of these files remain local and are excluded from Git. Back them up with `auth.json` and `quizroom.db` if you need to move the installation.
 
 ## Connect students over Wi-Fi/LAN
 
@@ -120,49 +133,30 @@ Incorrect answers earn 0 points. A correct answer earns from 300 to 1,000 points
 
 The local IP address can change after reconnecting to the network. If the page cannot be reached, check that the server is running, the IP address is current, all devices are on the same network, and the firewall allows the port.
 
-## Publish the project to GitHub
+## Update the GitHub repository
 
-The repository has not been created yet, and this project has not been uploaded. When you are ready:
-
-1. Sign in to GitHub as `azizs-dnv` and select **New repository**.
-2. Name the repository `quizweb` and choose whether it should be public or private.
-3. Do not initialize it with a README, `.gitignore`, or license; those files are already prepared in this project.
-4. Open a terminal in the local project directory, `myquizapp`, and run:
+The source repository is [github.com/azizs-dnv/quizweb](https://github.com/azizs-dnv/quizweb). From the local project directory, review the changes and run the tests before publishing:
 
 ```bash
-git init
-git add .
-git status
-```
-
-Review the `git status` output before continuing. It must not include `auth.json`, `quizroom.db`, `.venv`, or `__pycache__`; `.gitignore` excludes those local files. Do not commit real student results or quizzes containing confidential material.
-
-5. Create the first commit and connect it to the GitHub repository:
-
-```bash
-git commit -m "Initial QuizRoom project"
-git branch -M main
-git remote add origin https://github.com/azizs-dnv/quizweb.git
-git push -u origin main
-```
-
-6. Refresh the repository page on GitHub and confirm that the files are there. This uploads the source code only; it does not publish or run the QuizRoom server on GitHub.
-
-If Git reports that `origin` already exists, check `git remote -v` before changing it. For later updates, use:
-
-```bash
+git status --short
+python -m unittest discover -s tests -v
 git add .
 git commit -m "Describe your changes"
 git push
 ```
 
+Before committing, confirm that `auth.json`, `quizroom.db`, `.venv`, `__pycache__`, `teacher_data/`, and local quiz JSON files are not staged. `.gitignore` excludes these data files. GitHub stores the source only; it does not run the QuizRoom server.
+
 ## Data and backups
 
-- `auth.json` contains the teacher username, password salt and hash, and session signing key.
-- `tests/quizzes/*.json` contains created quizzes.
+- `auth.json` contains the default teacher username, password salt and hash, and session signing key.
+- `tests/quizzes/*.json` contains quizzes owned by the default teacher.
+- `teacher_data/<teacher-id>/` contains each additional teacher's account and quiz files.
 - `quizroom.db` contains rooms, answers, points, and attempt state in SQLite.
 
-Data stays on the computer running the server. `auth.json` and the SQLite database are excluded from Git by `.gitignore`. Before moving the app to another computer, back up `auth.json`, `tests/quizzes`, and `quizroom.db` separately. Do not publish these files, account credentials, or student personal data.
+The `rooms.owner_id` database field keeps each teacher's room list and controls scoped to its owner. Existing rooms are migrated to the `default` teacher when the server starts.
+
+Data stays on the computer running the server. Account files, quiz JSON, and the SQLite database are excluded from Git by `.gitignore`. Before moving the app to another computer, back up `auth.json`, `tests/quizzes`, `teacher_data`, and `quizroom.db` separately. Do not publish these files, account credentials, or student personal data.
 
 ## Run the project tests
 

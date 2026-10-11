@@ -1,6 +1,7 @@
 import hashlib
 import json
 import secrets
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ class QuizRoomFlowTest(unittest.TestCase):
         self.auth_file = self.root / "auth.json"
         self.database_file = self.root / "quizroom.db"
         self.quiz_directory = self.root / "tests" / "quizzes"
+        self.teacher_data_directory = self.root / "teacher_data"
         self.quiz_directory.mkdir(parents=True)
         salt = secrets.token_bytes(16)
         password_hash = hashlib.scrypt(b"correct-horse-battery", salt=salt, n=2**14, r=8, p=1, dklen=32)
@@ -32,6 +34,7 @@ class QuizRoomFlowTest(unittest.TestCase):
             AUTH_FILE=self.auth_file,
             DB_FILE=self.database_file,
             QUIZ_DIR=self.quiz_directory,
+            TEACHER_DATA_DIR=self.teacher_data_directory,
         )
         self.settings.start()
         server._init_database()
@@ -135,6 +138,120 @@ class QuizRoomFlowTest(unittest.TestCase):
         slower_points = server._points_for_correct_answer(30, 60)
         self.assertGreater(fast_points, slower_points)
         self.assertEqual(server._points_for_correct_answer(60, 60), 300)
+
+    def test_existing_database_is_migrated_without_losing_rooms(self):
+        legacy_database = self.root / "legacy.sqlite3"
+        connection = sqlite3.connect(legacy_database)
+        try:
+            connection.execute(
+                "CREATE TABLE rooms (code TEXT PRIMARY KEY, quiz_id TEXT NOT NULL, quiz_json TEXT NOT NULL, "
+                "status TEXT NOT NULL, created_at REAL NOT NULL, started_at REAL, deadline REAL)"
+            )
+            connection.execute(
+                "INSERT INTO rooms(code, quiz_id, quiz_json, status, created_at) VALUES (?, ?, ?, ?, ?)",
+                ("123456", "legacyquiz", "{}", "finished", 1),
+            )
+            connection.execute(
+                "CREATE TABLE participants (token TEXT PRIMARY KEY, room_code TEXT NOT NULL, name TEXT NOT NULL, "
+                "question_order TEXT NOT NULL, option_orders TEXT NOT NULL, answers TEXT NOT NULL DEFAULT '{}', "
+                "score INTEGER NOT NULL DEFAULT 0, correct_count INTEGER NOT NULL DEFAULT 0, "
+                "warnings INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'waiting', "
+                "joined_at REAL NOT NULL, last_seen REAL NOT NULL, finished_at REAL)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with patch.object(server, "DB_FILE", legacy_database):
+            server._init_database()
+        connection = sqlite3.connect(legacy_database)
+        try:
+            room = connection.execute("SELECT owner_id FROM rooms WHERE code = '123456'").fetchone()
+            participant_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(participants)").fetchall()
+            }
+        finally:
+            connection.close()
+        self.assertEqual(room[0], server.DEFAULT_TEACHER_ID)
+        self.assertIn("question_times", participant_columns)
+
+    def test_teacher_accounts_have_separate_quiz_folders_and_lists(self):
+        self.client.post("/api/auth/login", json={"username": "teacher", "password": "correct-horse-battery"})
+        default_quiz = self.client.post("/api/teacher/quizzes", json={
+            "title": "Default teacher quiz",
+            "duration_minutes": 5,
+            "questions": [{"text": "Question", "options": ["A", "B"], "correct_index": 0}],
+        }).json()
+        default_room_code = self.client.post(
+            f"/api/teacher/rooms/{default_quiz['id']}"
+        ).json()["code"]
+
+        registered = self.client.post("/api/auth/register", json={
+            "username": "second-teacher",
+            "password": "second-secure-password",
+        })
+        self.assertEqual(registered.status_code, 201, registered.text)
+        teacher_id = registered.json()["teacher_id"]
+        second_quiz = self.client.post("/api/teacher/quizzes", json={
+            "title": "Second teacher quiz",
+            "duration_minutes": 5,
+            "questions": [{"text": "Question", "options": ["A", "B"], "correct_index": 0}],
+        }).json()
+
+        own_quizzes = self.client.get("/api/teacher/quizzes").json()
+        self.assertEqual([quiz["title"] for quiz in own_quizzes], ["Second teacher quiz"])
+        self.assertTrue((self.quiz_directory / f"{default_quiz['id']}.json").exists())
+        self.assertTrue((self.teacher_data_directory / teacher_id / "quizzes" / f"{second_quiz['id']}.json").exists())
+        self.assertEqual(self.client.get(f"/api/teacher/quizzes/{default_quiz['id']}").status_code, 404)
+        self.assertEqual(self.client.get("/api/teacher/rooms").json(), [])
+        self.assertEqual(self.client.post(f"/api/teacher/rooms/{default_room_code}/start").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/teacher/rooms/{default_room_code}/export").status_code, 404)
+
+        logged_in = self.client.post("/api/auth/login", json={
+            "username": "SECOND-TEACHER",
+            "password": "second-secure-password",
+        })
+        self.assertEqual(logged_in.status_code, 200)
+        self.client.post("/api/auth/login", json={"username": "teacher", "password": "correct-horse-battery"})
+        default_quizzes = self.client.get("/api/teacher/quizzes").json()
+        self.assertEqual([quiz["title"] for quiz in default_quizzes], ["Default teacher quiz"])
+
+    def test_import_edit_and_active_room_lock(self):
+        self.client.post("/api/auth/login", json={"username": "teacher", "password": "correct-horse-battery"})
+        imported = self.client.post("/api/teacher/quizzes/import", json={"quizzes": [
+            {
+                "title": "Imported quiz one",
+                "duration_minutes": 5,
+                "questions": [{"text": "One?", "options": ["A", "B"], "correct_index": 1}],
+            },
+            {
+                "title": "Imported quiz two",
+                "duration_minutes": 8,
+                "questions": [{"type": "text", "text": "Name it", "expected_answer": "Earth"}],
+            },
+        ]})
+        self.assertEqual(imported.status_code, 201, imported.text)
+        self.assertEqual(imported.json()["imported_count"], 2)
+        quiz_id = imported.json()["quizzes"][0]["id"]
+        details = self.client.get(f"/api/teacher/quizzes/{quiz_id}")
+        self.assertEqual(details.status_code, 200)
+        self.assertEqual(details.json()["questions"][0]["correct_index"], 1)
+
+        update_body = {
+            "title": "Edited quiz",
+            "duration_minutes": 6,
+            "questions": [{"text": "Updated?", "options": ["Yes", "No"], "correct_index": 0}],
+        }
+        updated = self.client.put(f"/api/teacher/quizzes/{quiz_id}", json=update_body)
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["title"], "Edited quiz")
+
+        room = self.client.post(f"/api/teacher/rooms/{quiz_id}")
+        self.assertEqual(room.status_code, 201, room.text)
+        locked = self.client.put(f"/api/teacher/quizzes/{quiz_id}", json=update_body)
+        self.assertEqual(locked.status_code, 409)
+        self.client.post(f"/api/teacher/rooms/{room.json()['code']}/finish")
+        editable_again = self.client.put(f"/api/teacher/quizzes/{quiz_id}", json=update_body)
+        self.assertEqual(editable_again.status_code, 200, editable_again.text)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@ const app = document.querySelector("#app");
 const state = {
   role: "student",
   page: "home",
+  authMode: "login",
+  editingQuizId: null,
   quizzes: [],
   room: null,
   student: null,
@@ -87,17 +89,25 @@ function renderHome(message = "") {
     <div class="field"><label for="password">Password</label><input class="input" id="password" type="password" name="password" autocomplete="current-password" required></div>
     <div class="form-error">${escapeHtml(message)}</div><button class="button" type="submit">Sign in <span aria-hidden="true">→</span></button>
     <p class="caption">First time here? Create an account with <span class="mono">python init_admin.py</span>.</p>
+    <button class="link-button" type="button" data-action="auth-mode" data-mode="register">Create a separate teacher account</button>
   </form>`;
-  const form = state.role === "student" ? studentForm : teacherForm;
+  const registerForm = `<form id="register-form">
+    <div class="field"><label for="new-username">Teacher username</label><input class="input" id="new-username" name="username" minlength="3" maxlength="80" autocomplete="username" required></div>
+    <div class="field"><label for="new-password">Password (at least 10 characters)</label><input class="input" id="new-password" name="password" type="password" minlength="10" autocomplete="new-password" required></div>
+    <div class="form-error">${escapeHtml(message)}</div><button class="button" type="submit">Create account <span aria-hidden="true">→</span></button>
+    <button class="link-button" type="button" data-action="auth-mode" data-mode="login">Back to sign in</button>
+  </form>`;
+  const teacherFormContent = state.authMode === "register" ? registerForm : teacherForm;
+  const form = state.role === "student" ? studentForm : teacherFormContent;
   app.innerHTML = shell(`<section class="home-grid">
     <div class="intro"><p class="eyebrow">Classroom testing on your network</p><h1>Class is ready.<br><span>Game on.</span></h1><p class="intro-copy">Live quizzes, a class leaderboard, and results in one place. Teachers need a computer; students only need a browser and a room code.</p><div class="intro-note"><span class="pulse"></span> Runs on your local Wi-Fi</div></div>
-    <section class="panel"><div class="panel-head"><div><p class="eyebrow">Enter QuizRoom</p><h2>${state.role === "student" ? "Join a room" : "Welcome back"}</h2></div></div>${roleTabs()}${form}</section>
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">Enter QuizRoom</p><h2>${state.role === "student" ? "Join a room" : state.authMode === "register" ? "Create teacher account" : "Welcome back"}</h2></div></div>${roleTabs()}${form}</section>
   </section><p class="footer-note">Local quizzes · quick answers · live leaderboard</p>`);
 }
 
-function choiceOptionRow(questionId, index, type, value = "") {
+function choiceOptionRow(questionId, index, type, value = "", isCorrect = false) {
   const control = type === "multiple_choice" ? "checkbox" : "radio";
-  const checked = type === "single_choice" && index === 0 ? "checked" : "";
+  const checked = isCorrect || (type === "single_choice" && index === 0 && value === "") ? "checked" : "";
   return `<div class="option-edit-row"><input type="${control}" name="correct-${questionId}" value="${index}" ${checked} aria-label="Correct answer"><input type="text" class="option-text" maxlength="300" placeholder="Option ${index + 1}" value="${escapeHtml(value)}" required><button class="mini-icon" type="button" data-action="remove-option" title="Remove option" aria-label="Remove option">×</button></div>`;
 }
 
@@ -105,24 +115,30 @@ function matchingPairRow(left = "", right = "", number = 1) {
   return `<div class="pair-edit-row"><span class="pair-number">${number}</span><input type="text" class="match-left" maxlength="300" placeholder="Left item ${number}" value="${escapeHtml(left)}" required><input type="text" class="match-right" maxlength="300" placeholder="Match ${number}" value="${escapeHtml(right)}" required><button class="mini-icon" type="button" data-action="remove-pair" title="Remove pair" aria-label="Remove pair">×</button></div>`;
 }
 
-function questionTypeFields(questionId, type = "single_choice", options = ["", ""], pairs = [{ left: "", right: "" }, { left: "", right: "" }]) {
+function questionTypeFields(questionId, type = "single_choice", options = ["", ""], pairs = [{ left: "", right: "" }, { left: "", right: "" }], question = null, optionRows = null) {
   if (type === "text") {
-    return `<div class="field"><label>Expected answer</label><input class="input expected-answer" maxlength="1000" placeholder="Enter the accepted answer" required><p class="caption">Answers are checked automatically, ignoring case and extra spaces.</p></div>`;
+    return `<div class="field"><label>Expected answer</label><input class="input expected-answer" maxlength="1000" placeholder="Enter the accepted answer" value="${escapeHtml(question?.expected_answer || "")}" required><p class="caption">Answers are checked automatically, ignoring case and extra spaces.</p></div>`;
   }
   if (type === "matching") {
     return `<span class="field-label">Create 2–12 unique pairs to match</span><div class="pair-editor">${pairs.map((pair, index) => matchingPairRow(pair.left, pair.right, index + 1)).join("")}</div><button class="link-button" type="button" data-action="add-pair">+ Add pair</button>`;
   }
   const guidance = type === "multiple_choice" ? "Select every correct option" : "Mark the one correct answer";
-  return `<span class="field-label">Answer options · ${guidance.toLowerCase()}</span><div class="option-editor">${options.map((value, index) => choiceOptionRow(questionId, index, type, value)).join("")}</div><button class="link-button add-option" type="button" data-action="add-option">+ Add option</button>`;
+  return `<span class="field-label">Answer options · ${guidance.toLowerCase()}</span><div class="option-editor">${optionRows || options.map((value, index) => choiceOptionRow(questionId, index, type, value)).join("")}</div><button class="link-button add-option" type="button" data-action="add-option">+ Add option</button>`;
 }
 
-function questionEditor(number) {
+function questionEditor(number, question = null) {
   const questionId = `q-${crypto.randomUUID()}`;
+  const type = question?.type || "single_choice";
+  const options = question?.options || ["", ""];
+  const pairs = question?.pairs || [{ left: "", right: "" }, { left: "", right: "" }];
+  const optionRows = type === "multiple_choice"
+    ? options.map((value, index) => choiceOptionRow(questionId, index, type, value, question.correct_indices.includes(index))).join("")
+    : options.map((value, index) => choiceOptionRow(questionId, index, type, value, index === question?.correct_index)).join("");
   return `<article class="question-card" data-question-id="${questionId}">
     <div class="question-top"><strong>QUESTION ${number}</strong><button class="mini-icon" type="button" data-action="remove-question" title="Remove question" aria-label="Remove question">×</button></div>
-    <div class="field"><label>Question</label><textarea class="textarea question-text" maxlength="1000" placeholder="Enter a question" required></textarea></div>
-    <div class="field"><label>Question type</label><select class="select question-type"><option value="single_choice">Single choice</option><option value="multiple_choice">Multiple choice</option><option value="text">Open text</option><option value="matching">Matching pairs</option></select></div>
-    <div class="type-fields">${questionTypeFields(questionId)}</div>
+    <div class="field"><label>Question</label><textarea class="textarea question-text" maxlength="1000" placeholder="Enter a question" required>${escapeHtml(question?.text || "")}</textarea></div>
+    <div class="field"><label>Question type</label><select class="select question-type"><option value="single_choice" ${type === "single_choice" ? "selected" : ""}>Single choice</option><option value="multiple_choice" ${type === "multiple_choice" ? "selected" : ""}>Multiple choice</option><option value="text" ${type === "text" ? "selected" : ""}>Open text</option><option value="matching" ${type === "matching" ? "selected" : ""}>Matching pairs</option></select></div>
+    <div class="type-fields">${questionTypeFields(questionId, type, options, pairs, question, optionRows)}</div>
   </article>`;
 }
 
@@ -172,17 +188,18 @@ async function submitStudentAnswer(questionId, answer) {
   }
 }
 
-function renderBuilder() {
+function renderBuilder(quiz = null) {
   state.page = "builder";
+  state.editingQuizId = quiz?.id || null;
   closeSocket();
   app.innerHTML = shell(`<section class="builder">
-    <div class="builder-head"><div><p class="eyebrow">Quiz builder</p><h1>New quiz</h1></div><button class="button secondary small" data-action="dashboard">← Back to quizzes</button></div>
+    <div class="builder-head"><div><p class="eyebrow">Quiz builder</p><h1>${quiz ? "Edit quiz" : "New quiz"}</h1></div><button class="button secondary small" data-action="dashboard">← Back to quizzes</button></div>
     <form id="quiz-form"><div class="panel">
-      <div class="field"><label for="quiz-title">Quiz title</label><input class="input" id="quiz-title" name="title" maxlength="120" placeholder="For example, Geometry: triangles" required></div>
-      <div class="field"><label for="quiz-duration">Total duration, minutes</label><input class="input" id="quiz-duration" name="duration" type="number" min="1" max="240" value="10" required></div>
-      <div class="section-title"><h2>Questions</h2><span class="muted" id="question-count">1 question</span></div>
-      <div class="question-list" id="question-list">${questionEditor(1)}</div>
-      <div class="form-error" id="builder-error"></div><div class="toolbar"><button class="button secondary" type="button" data-action="add-question">+ Add question</button><button class="button" type="submit">Save quiz →</button></div>
+      <div class="field"><label for="quiz-title">Quiz title</label><input class="input" id="quiz-title" name="title" maxlength="120" placeholder="For example, Geometry: triangles" value="${escapeHtml(quiz?.title || "")}" required></div>
+      <div class="field"><label for="quiz-duration">Total duration, minutes</label><input class="input" id="quiz-duration" name="duration" type="number" min="1" max="240" value="${quiz?.duration_minutes || 10}" required></div>
+      <div class="section-title"><h2>Questions</h2><span class="muted" id="question-count">${quiz?.questions.length || 1} ${(quiz?.questions.length || 1) === 1 ? "question" : "questions"}</span></div>
+      <div class="question-list" id="question-list">${quiz ? quiz.questions.map((question, index) => questionEditor(index + 1, question)).join("") : questionEditor(1)}</div>
+      <div class="form-error" id="builder-error"></div><div class="toolbar"><button class="button secondary" type="button" data-action="add-question">+ Add question</button><button class="button" type="submit">${quiz ? "Save changes" : "Save quiz"} →</button></div>
     </div></form>
   </section>`);
 }
@@ -193,12 +210,12 @@ function renderTeacherDashboard() {
     ? state.quizzes
         .map(
           (quiz) =>
-            `<article class="quiz-row"><div><h3>${escapeHtml(quiz.title)}</h3><p>${quiz.question_count} questions · ${quiz.duration_minutes} min</p></div><div class="row-actions"><button class="button small" data-action="create-room" data-id="${escapeHtml(quiz.id)}">Launch</button><button class="mini-icon" data-action="delete-quiz" data-id="${escapeHtml(quiz.id)}" title="Delete quiz" aria-label="Delete quiz">×</button></div></article>`,
+            `<article class="quiz-row"><div><h3>${escapeHtml(quiz.title)}</h3><p>${quiz.question_count} questions · ${quiz.duration_minutes} min${quiz.active ? " · Active room" : ""}</p></div><div class="row-actions"><button class="button secondary small" data-action="edit-quiz" data-id="${escapeHtml(quiz.id)}" ${quiz.active ? "disabled title=\"Finish the active room before editing\"" : ""}>Edit</button><button class="button small" data-action="create-room" data-id="${escapeHtml(quiz.id)}">Launch</button><button class="mini-icon" data-action="delete-quiz" data-id="${escapeHtml(quiz.id)}" title="Delete quiz" aria-label="Delete quiz">×</button></div></article>`,
         )
         .join("")
     : `<div class="empty-state">No quizzes yet. Create your first quiz to open a room.</div>`;
   app.innerHTML =
-    shell(`<div class="dashboard-head"><div><p class="eyebrow">Teacher dashboard</p><h1>Manage your class</h1></div><div class="row-actions"><button class="button secondary small" data-action="logout">Sign out</button><button class="button" data-action="builder">+ New quiz</button></div></div>
+    shell(`<div class="dashboard-head"><div><p class="eyebrow">Teacher dashboard</p><h1>Manage your class</h1></div><div class="row-actions"><input id="quiz-import-input" type="file" accept=".json,application/json" multiple hidden><button class="button secondary" data-action="import-quizzes">Import JSON</button><button class="button secondary small" data-action="logout">Sign out</button><button class="button" data-action="builder">+ New quiz</button></div></div>
     <div id="room-live"></div><div class="dashboard-layout"><section><h2 class="section-title">Your quizzes <span class="mono muted">${state.quizzes.length}</span></h2><div class="quiz-list">${quizRows}</div></section>
     <aside class="panel"><p class="eyebrow">How it works</p><h2>One room<br>for the whole class</h2><p class="muted">Create a quiz, share its six-digit code, wait for students, then start the shared timer.</p><p class="caption">Results are saved on this computer and can be downloaded as a TXT file.</p></aside></div>`);
   updateRoomPanel();
@@ -456,6 +473,25 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("blur", flagFocusLoss);
 
 document.addEventListener("change", (event) => {
+  if (event.target.id === "quiz-import-input") {
+    const files = [...event.target.files];
+    if (!files.length) return;
+    Promise.all(files.map(async (file) => JSON.parse(await file.text())))
+      .then(async (documents) => {
+        const quizzes = documents.flatMap((document) =>
+          Array.isArray(document) ? document : Array.isArray(document.quizzes) ? document.quizzes : [document],
+        );
+        const result = await api("/api/teacher/quizzes/import", {
+          method: "POST",
+          body: { quizzes },
+        });
+        showToast(`Imported ${result.imported_count} ${result.imported_count === 1 ? "quiz" : "quizzes"}.`);
+        await loadTeacher();
+      })
+      .catch((error) => showToast(`Import failed: ${error.message}`))
+      .finally(() => { event.target.value = ""; });
+    return;
+  }
   const selector = event.target.closest(".question-type");
   if (!selector) return;
   const card = selector.closest(".question-card");
@@ -476,6 +512,7 @@ document.addEventListener("click", async (event) => {
       localStorage.setItem("quizroomTheme", next);
     } else if (action === "role") {
       state.role = button.dataset.role;
+      state.authMode = "login";
       renderHome();
     } else if (action === "home") {
       state.role = "student";
@@ -484,6 +521,14 @@ document.addEventListener("click", async (event) => {
       await resumeStudent();
     } else if (action === "builder") {
       renderBuilder();
+    } else if (action === "auth-mode") {
+      state.authMode = button.dataset.mode;
+      renderHome();
+    } else if (action === "import-quizzes") {
+      document.querySelector("#quiz-import-input")?.click();
+    } else if (action === "edit-quiz") {
+      const quiz = await api(`/api/teacher/quizzes/${button.dataset.id}`);
+      renderBuilder(quiz);
     } else if (action === "dashboard") {
       await loadTeacher();
     } else if (action === "logout") {
@@ -619,6 +664,15 @@ document.addEventListener("submit", async (event) => {
       state.teacherToken = result.token;
       sessionStorage.setItem("teacherToken", result.token);
       await loadTeacher();
+    } else if (form.id === "register-form") {
+      const result = await api("/api/auth/register", {
+        method: "POST",
+        body: Object.fromEntries(new FormData(form)),
+      });
+      state.teacherToken = result.token;
+      sessionStorage.setItem("teacherToken", result.token);
+      state.authMode = "login";
+      await loadTeacher();
     } else if (form.id === "quiz-form") {
       const questions = [...document.querySelectorAll(".question-card")].map((card) => {
         const type = card.querySelector(".question-type").value;
@@ -644,15 +698,20 @@ document.addEventListener("submit", async (event) => {
         }
         return question;
       });
-      const quiz = await api("/api/teacher/quizzes", {
-        method: "POST",
+      const quiz = await api(
+        state.editingQuizId
+          ? `/api/teacher/quizzes/${state.editingQuizId}`
+          : "/api/teacher/quizzes",
+        {
+        method: state.editingQuizId ? "PUT" : "POST",
         body: {
           title: form.elements.title.value,
           duration_minutes: Number(form.elements.duration.value),
           questions,
         },
       });
-      showToast(`Quiz "${quiz.title}" saved.`);
+      state.editingQuizId = null;
+      showToast(`Quiz "${quiz.title}" ${quiz.created_at ? "saved" : "imported"}.`);
       await loadTeacher();
     }
   } catch (error) {

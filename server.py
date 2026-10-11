@@ -8,29 +8,38 @@ import json
 import random
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 
 BASE_DIR = Path(__file__).resolve().parent
 QUIZ_DIR = BASE_DIR / "tests" / "quizzes"
+TEACHER_DATA_DIR = BASE_DIR / "teacher_data"
 AUTH_FILE = BASE_DIR / "auth.json"
 DB_FILE = BASE_DIR / "quizroom.db"
 COOKIE_NAME = "quizroom_teacher"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30
+DEFAULT_TEACHER_ID = "default"
+_REGISTRATION_LOCK = threading.Lock()
 QUIZ_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="QuizRoom", version="1.0.0")
 
 
 class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterBody(BaseModel):
     username: str
     password: str
 
@@ -81,6 +90,7 @@ def _init_database() -> None:
             CREATE TABLE IF NOT EXISTS rooms (
                 code TEXT PRIMARY KEY,
                 quiz_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL DEFAULT 'default',
                 quiz_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at REAL NOT NULL,
@@ -106,6 +116,13 @@ def _init_database() -> None:
             );
             """
         )
+        room_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(rooms)").fetchall()
+        }
+        if "owner_id" not in room_columns:
+            connection.execute(
+                "ALTER TABLE rooms ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'default'"
+            )
         columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(participants)").fetchall()
         }
@@ -130,43 +147,97 @@ def _read_auth() -> dict[str, str] | None:
     return None
 
 
-def _sign_session(secret: str, issued_at: int | None = None) -> str:
-    payload = f"teacher:{issued_at or int(time.time())}"
+def _valid_teacher_id(teacher_id: str) -> bool:
+    return len(teacher_id) == 24 and all(character in "0123456789abcdef" for character in teacher_id)
+
+
+def _account_for_id(teacher_id: str) -> dict[str, str] | None:
+    if teacher_id == DEFAULT_TEACHER_ID:
+        return _read_auth()
+    if not _valid_teacher_id(teacher_id):
+        return None
+    account_path = TEACHER_DATA_DIR / teacher_id / "account.json"
+    try:
+        account = json.loads(account_path.read_text(encoding="utf-8"))
+        if all(key in account for key in ("username", "password_salt", "password_hash")):
+            return account
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _account_for_username(username: str) -> tuple[str, dict[str, str]] | None:
+    normalized = username.strip().casefold()
+    default_account = _read_auth()
+    if default_account and default_account["username"].casefold() == normalized:
+        return DEFAULT_TEACHER_ID, default_account
+    if TEACHER_DATA_DIR.exists():
+        for account_path in TEACHER_DATA_DIR.glob("*/account.json"):
+            teacher_id = account_path.parent.name
+            account = _account_for_id(teacher_id)
+            if account and account["username"].casefold() == normalized:
+                return teacher_id, account
+    return None
+
+
+def _quiz_directory(teacher_id: str) -> Path:
+    if teacher_id == DEFAULT_TEACHER_ID:
+        return QUIZ_DIR
+    if not _valid_teacher_id(teacher_id) or _account_for_id(teacher_id) is None:
+        raise HTTPException(status_code=401, detail="Teacher account not found.")
+    directory = TEACHER_DATA_DIR / teacher_id / "quizzes"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _sign_session(secret: str, teacher_id: str = DEFAULT_TEACHER_ID, issued_at: int | None = None) -> str:
+    payload = f"teacher:{teacher_id}:{issued_at or int(time.time())}"
     encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
     signature = hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
     return f"{encoded}.{signature}"
 
 
-def _valid_teacher_token(token: str | None) -> bool:
+def _valid_teacher_token(token: str | None) -> str | None:
     auth = _read_auth()
     if not auth or not token or "." not in token:
-        return False
+        return None
     encoded, signature = token.rsplit(".", 1)
     expected = hmac.new(auth["token_secret"].encode(), encoded.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
-        return False
+        return None
     try:
         payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
-        kind, issued_at = payload.split(":", 1)
+        parts = payload.split(":")
+        if len(parts) == 2:
+            kind, issued_at = parts
+            teacher_id = DEFAULT_TEACHER_ID
+        elif len(parts) == 3:
+            kind, teacher_id, issued_at = parts
+        else:
+            return None
         age = int(time.time()) - int(issued_at)
-        return kind == "teacher" and 0 <= age <= SESSION_MAX_AGE
+        if kind == "teacher" and 0 <= age <= SESSION_MAX_AGE and _account_for_id(teacher_id):
+            return teacher_id
+        return None
     except (ValueError, UnicodeDecodeError):
-        return False
+        return None
 
 
-def _require_teacher(request: Request) -> None:
-    if not _valid_teacher_token(request.cookies.get(COOKIE_NAME)):
+def _require_teacher(request: Request) -> str:
+    teacher_id = _valid_teacher_token(request.cookies.get(COOKIE_NAME))
+    if teacher_id is None:
         raise HTTPException(status_code=401, detail="Teacher sign-in is required.")
+    return teacher_id
 
 
-def _quiz_path(quiz_id: str) -> Path:
+def _quiz_path(quiz_id: str, teacher_id: str = DEFAULT_TEACHER_ID) -> Path:
     if not quiz_id.isalnum():
         raise HTTPException(status_code=404, detail="Quiz not found.")
-    return QUIZ_DIR / f"{quiz_id}.json"
+    return _quiz_directory(teacher_id) / f"{quiz_id}.json"
 
 
-def _load_quiz(quiz_id: str) -> dict[str, Any]:
-    path = _quiz_path(quiz_id)
+def _load_quiz(quiz_id: str, teacher_id: str = DEFAULT_TEACHER_ID) -> dict[str, Any]:
+    path = _quiz_path(quiz_id, teacher_id)
     try:
         quiz = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(quiz.get("questions"), list):
@@ -387,57 +458,84 @@ def config() -> dict[str, Any]:
 
 @app.post("/api/auth/login")
 def login(body: LoginBody):
-    auth = _read_auth()
-    if not auth:
+    root_auth = _read_auth()
+    if not root_auth:
         raise HTTPException(status_code=409, detail="Run init_admin.py to create the teacher account first.")
+    account_entry = _account_for_username(body.username)
+    if account_entry is None:
+        raise HTTPException(status_code=401, detail="Incorrect username or password.")
+    teacher_id, auth = account_entry
     candidate = hashlib.scrypt(
         body.password.encode(), salt=bytes.fromhex(auth["password_salt"]), n=2**14, r=8, p=1, dklen=32
     ).hex()
-    if body.username != auth["username"] or not hmac.compare_digest(candidate, auth["password_hash"]):
+    if not hmac.compare_digest(candidate, auth["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect username or password.")
-    token = _sign_session(auth["token_secret"])
-    response = {"username": auth["username"], "token": token}
-    from fastapi.responses import JSONResponse
+    token = _sign_session(root_auth["token_secret"], teacher_id)
+    result = JSONResponse({"username": auth["username"], "teacher_id": teacher_id, "token": token})
+    result.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=SESSION_MAX_AGE)
+    return result
 
-    result = JSONResponse(response)
+
+@app.post("/api/auth/register", status_code=201)
+def register_teacher(body: RegisterBody):
+    root_auth = _read_auth()
+    if not root_auth:
+        raise HTTPException(status_code=409, detail="Run init_admin.py to create the first teacher account.")
+    username = body.username.strip()
+    if not 3 <= len(username) <= 80:
+        raise HTTPException(status_code=422, detail="Username must contain between 3 and 80 characters.")
+    if len(body.password) < 10:
+        raise HTTPException(status_code=422, detail="Password must contain at least 10 characters.")
+
+    with _REGISTRATION_LOCK:
+        if _account_for_username(username):
+            raise HTTPException(status_code=409, detail="That username is already in use.")
+        teacher_id = secrets.token_hex(12)
+        salt = secrets.token_bytes(16)
+        account = {
+            "username": username,
+            "password_salt": salt.hex(),
+            "password_hash": hashlib.scrypt(
+                body.password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32
+            ).hex(),
+            "created_at": time.time(),
+        }
+        account_directory = TEACHER_DATA_DIR / teacher_id
+        account_directory.mkdir(parents=True, exist_ok=False)
+        account_file = account_directory / "account.json"
+        temporary_file = account_directory / "account.tmp"
+        temporary_file.write_text(json.dumps(account, indent=2), encoding="utf-8")
+        try:
+            temporary_file.chmod(0o600)
+        except OSError:
+            pass
+        temporary_file.replace(account_file)
+
+    token = _sign_session(root_auth["token_secret"], teacher_id)
+    result = JSONResponse(
+        {"username": username, "teacher_id": teacher_id, "token": token}, status_code=201
+    )
     result.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=SESSION_MAX_AGE)
     return result
 
 
 @app.post("/api/auth/logout")
 def logout():
-    from fastapi.responses import JSONResponse
-
     result = JSONResponse({"ok": True})
     result.delete_cookie(COOKIE_NAME)
     return result
 
 
-@app.get("/api/teacher/quizzes")
-def list_quizzes(request: Request) -> list[dict[str, Any]]:
-    _require_teacher(request)
-    quizzes = []
-    for path in sorted(QUIZ_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
-        try:
-            quiz = json.loads(path.read_text(encoding="utf-8"))
-            quizzes.append(_public_quiz(quiz))
-        except (OSError, json.JSONDecodeError):
-            continue
-    return quizzes
-
-
-@app.post("/api/teacher/quizzes", status_code=201)
-def create_quiz(body: QuizBody, request: Request) -> dict[str, Any]:
-    _require_teacher(request)
-    title = body.title.strip()
+def _build_quiz(title: str, duration_minutes: int, raw_questions: list[dict[str, Any]]) -> dict[str, Any]:
+    title = title.strip()
     if not title or len(title) > 120:
         raise HTTPException(status_code=422, detail="Quiz title must be between 1 and 120 characters.")
-    if not 1 <= body.duration_minutes <= 240:
+    if not 1 <= duration_minutes <= 240:
         raise HTTPException(status_code=422, detail="Duration must be between 1 and 240 minutes.")
-    if not 1 <= len(body.questions) <= 100:
+    if not 1 <= len(raw_questions) <= 100:
         raise HTTPException(status_code=422, detail="Add between 1 and 100 questions.")
     questions = []
-    for position, item in enumerate(body.questions, start=1):
+    for position, item in enumerate(raw_questions, start=1):
         text = str(item.get("text", "")).strip()
         question_type = item.get("type", "single_choice")
         if question_type not in QUESTION_TYPES:
@@ -491,28 +589,114 @@ def create_quiz(body: QuizBody, request: Request) -> dict[str, Any]:
                 raise HTTPException(status_code=422, detail=f"Matching items must be unique on each side for question {position}.")
             question["pairs"] = pairs
         questions.append(question)
-    quiz = {
+    return {
         "id": secrets.token_hex(8),
         "title": title,
-        "duration_minutes": body.duration_minutes,
+        "duration_minutes": duration_minutes,
         "questions": questions,
         "created_at": time.time(),
     }
-    _quiz_path(quiz["id"]).write_text(json.dumps(quiz, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _quiz_has_active_room(quiz_id: str, teacher_id: str) -> bool:
+    with _database() as connection:
+        return connection.execute(
+            "SELECT 1 FROM rooms WHERE quiz_id = ? AND owner_id = ? AND status IN ('waiting', 'running') LIMIT 1",
+            (quiz_id, teacher_id),
+        ).fetchone() is not None
+
+
+def _write_quiz(quiz: dict[str, Any], teacher_id: str) -> None:
+    path = _quiz_path(quiz["id"], teacher_id)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(quiz, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+@app.get("/api/teacher/quizzes")
+def list_quizzes(request: Request) -> list[dict[str, Any]]:
+    teacher_id = _require_teacher(request)
+    directory = _quiz_directory(teacher_id)
+    quizzes = []
+    for path in sorted(directory.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            quiz = json.loads(path.read_text(encoding="utf-8"))
+            summary = _public_quiz(quiz)
+            summary["active"] = _quiz_has_active_room(quiz["id"], teacher_id)
+            quizzes.append(summary)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return quizzes
+
+
+@app.post("/api/teacher/quizzes", status_code=201)
+def create_quiz(body: QuizBody, request: Request) -> dict[str, Any]:
+    teacher_id = _require_teacher(request)
+    quiz = _build_quiz(body.title, body.duration_minutes, body.questions)
+    _write_quiz(quiz, teacher_id)
     return _public_quiz(quiz)
+
+
+@app.get("/api/teacher/quizzes/{quiz_id}")
+def get_quiz(quiz_id: str, request: Request) -> dict[str, Any]:
+    teacher_id = _require_teacher(request)
+    return _load_quiz(quiz_id, teacher_id)
+
+
+@app.put("/api/teacher/quizzes/{quiz_id}")
+def update_quiz(quiz_id: str, body: QuizBody, request: Request) -> dict[str, Any]:
+    teacher_id = _require_teacher(request)
+    path = _quiz_path(quiz_id, teacher_id)
+    existing = _load_quiz(quiz_id, teacher_id)
+    if _quiz_has_active_room(quiz_id, teacher_id):
+        raise HTTPException(status_code=409, detail="Finish this quiz's active room before editing it.")
+    quiz = _build_quiz(body.title, body.duration_minutes, body.questions)
+    quiz["id"] = quiz_id
+    quiz["created_at"] = existing.get("created_at", time.time())
+    _write_quiz(quiz, teacher_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    return _public_quiz(quiz)
+
+
+@app.post("/api/teacher/quizzes/import", status_code=201)
+async def import_quizzes(request: Request) -> dict[str, Any]:
+    teacher_id = _require_teacher(request)
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Import file must contain valid JSON.") from None
+    if isinstance(payload, dict) and "quizzes" in payload:
+        raw_quizzes = payload["quizzes"]
+    elif isinstance(payload, list):
+        raw_quizzes = payload
+    else:
+        raw_quizzes = [payload]
+    if not isinstance(raw_quizzes, list) or not 1 <= len(raw_quizzes) <= 50:
+        raise HTTPException(status_code=422, detail="Import 1 to 50 quizzes at a time.")
+
+    imported = []
+    for raw_quiz in raw_quizzes:
+        if not isinstance(raw_quiz, dict):
+            raise HTTPException(status_code=422, detail="Each imported quiz must be a JSON object.")
+        try:
+            body = QuizBody(**raw_quiz)
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="Imported quiz has an invalid structure.") from None
+        imported.append(_build_quiz(body.title, body.duration_minutes, body.questions))
+
+    for quiz in imported:
+        _write_quiz(quiz, teacher_id)
+    return {"imported_count": len(imported), "quizzes": [_public_quiz(quiz) for quiz in imported]}
 
 
 @app.delete("/api/teacher/quizzes/{quiz_id}")
 def delete_quiz(quiz_id: str, request: Request) -> dict[str, bool]:
-    _require_teacher(request)
-    path = _quiz_path(quiz_id)
+    teacher_id = _require_teacher(request)
+    path = _quiz_path(quiz_id, teacher_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Quiz not found.")
-    with _database() as connection:
-        active = connection.execute(
-            "SELECT 1 FROM rooms WHERE quiz_id = ? AND status IN ('waiting', 'running') LIMIT 1", (quiz_id,)
-        ).fetchone()
-    if active:
+    if _quiz_has_active_room(quiz_id, teacher_id):
         raise HTTPException(status_code=409, detail="Finish the active room for this quiz before deleting it.")
     path.unlink()
     return {"ok": True}
@@ -520,23 +704,26 @@ def delete_quiz(quiz_id: str, request: Request) -> dict[str, bool]:
 
 @app.get("/api/teacher/rooms")
 def list_rooms(request: Request) -> list[dict[str, Any]]:
-    _require_teacher(request)
+    teacher_id = _require_teacher(request)
     with _database() as connection:
-        rows = connection.execute("SELECT code FROM rooms ORDER BY created_at DESC LIMIT 30").fetchall()
+        rows = connection.execute(
+            "SELECT code FROM rooms WHERE owner_id = ? ORDER BY created_at DESC LIMIT 30", (teacher_id,)
+        ).fetchall()
     return [_room_state(row["code"]) for row in rows]
 
 
 @app.post("/api/teacher/rooms/{quiz_id}", status_code=201)
 def create_room(quiz_id: str, request: Request) -> dict[str, Any]:
-    _require_teacher(request)
-    quiz = _load_quiz(quiz_id)
+    teacher_id = _require_teacher(request)
+    quiz = _load_quiz(quiz_id, teacher_id)
     with _database() as connection:
         for _ in range(20):
             code = f"{secrets.randbelow(900000) + 100000}"
             try:
                 connection.execute(
-                    "INSERT INTO rooms(code, quiz_id, quiz_json, status, created_at) VALUES (?, ?, ?, 'waiting', ?)",
-                    (code, quiz_id, json.dumps(quiz, ensure_ascii=False), time.time()),
+                    "INSERT INTO rooms(code, quiz_id, owner_id, quiz_json, status, created_at) "
+                    "VALUES (?, ?, ?, ?, 'waiting', ?)",
+                    (code, quiz_id, teacher_id, json.dumps(quiz, ensure_ascii=False), time.time()),
                 )
                 break
             except sqlite3.IntegrityError:
@@ -673,9 +860,11 @@ def student_ping(body: TokenBody) -> dict[str, Any]:
 
 @app.post("/api/teacher/rooms/{code}/start")
 def start_room(code: str, request: Request) -> dict[str, Any]:
-    _require_teacher(request)
+    teacher_id = _require_teacher(request)
     with _database() as connection:
-        room = connection.execute("SELECT * FROM rooms WHERE code = ?", (code,)).fetchone()
+        room = connection.execute(
+            "SELECT * FROM rooms WHERE code = ? AND owner_id = ?", (code, teacher_id)
+        ).fetchone()
         if room is None:
             raise HTTPException(status_code=404, detail="Room not found.")
         count = connection.execute("SELECT COUNT(*) FROM participants WHERE room_code = ?", (code,)).fetchone()[0]
@@ -691,12 +880,16 @@ def start_room(code: str, request: Request) -> dict[str, Any]:
 
 @app.post("/api/teacher/rooms/{code}/finish")
 def finish_room(code: str, request: Request) -> dict[str, Any]:
-    _require_teacher(request)
+    teacher_id = _require_teacher(request)
     with _database() as connection:
-        room = connection.execute("SELECT status FROM rooms WHERE code = ?", (code,)).fetchone()
+        room = connection.execute(
+            "SELECT status FROM rooms WHERE code = ? AND owner_id = ?", (code, teacher_id)
+        ).fetchone()
         if room is None:
             raise HTTPException(status_code=404, detail="Room not found.")
-        connection.execute("UPDATE rooms SET status = 'finished' WHERE code = ?", (code,))
+        connection.execute(
+            "UPDATE rooms SET status = 'finished' WHERE code = ? AND owner_id = ?", (code, teacher_id)
+        )
         connection.execute(
             "UPDATE participants SET status = CASE WHEN status = 'blocked' THEN status ELSE 'completed' END, "
             "finished_at = COALESCE(finished_at, ?) WHERE room_code = ?",
@@ -707,8 +900,10 @@ def finish_room(code: str, request: Request) -> dict[str, Any]:
 
 @app.get("/api/teacher/rooms/{code}/export")
 def export_results(code: str, request: Request) -> PlainTextResponse:
-    _require_teacher(request)
+    teacher_id = _require_teacher(request)
     room = _room_row(code)
+    if room["owner_id"] != teacher_id:
+        raise HTTPException(status_code=404, detail="Room not found.")
     quiz = json.loads(room["quiz_json"])
     board = _ranked_participants(code)
     lines = [f"Results: {quiz['title']}", f"Room code: {code}", "", "Place | Student | Points | Correct | Grade / 10 | Time (sec.)"]
@@ -724,19 +919,21 @@ def export_results(code: str, request: Request) -> PlainTextResponse:
 
 @app.websocket("/ws")
 async def websocket_updates(websocket: WebSocket) -> None:
-    await websocket.accept()
-    teacher = _valid_teacher_token(websocket.cookies.get(COOKIE_NAME))
+    teacher_id = _valid_teacher_token(websocket.cookies.get(COOKIE_NAME))
     student_token = websocket.query_params.get("token")
-    if not teacher and not student_token:
+    if teacher_id is None and not student_token:
         await websocket.close(code=4401)
         return
+    await websocket.accept()
     try:
         while True:
             try:
-                if teacher:
+                if teacher_id is not None:
                     with _database() as connection:
                         rows = connection.execute(
-                            "SELECT code FROM rooms WHERE status IN ('waiting', 'running') ORDER BY created_at DESC"
+                            "SELECT code FROM rooms WHERE owner_id = ? AND status IN ('waiting', 'running') "
+                            "ORDER BY created_at DESC",
+                            (teacher_id,),
                         ).fetchall()
                     payload = {"type": "teacher", "rooms": [_room_state(row["code"]) for row in rows]}
                 else:
