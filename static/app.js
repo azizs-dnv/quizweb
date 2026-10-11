@@ -216,15 +216,28 @@ function renderTeacherDashboard() {
     : `<div class="empty-state">No quizzes yet. Create your first quiz to open a room.</div>`;
   app.innerHTML =
     shell(`<div class="dashboard-head"><div><p class="eyebrow">Teacher dashboard</p><h1>Manage your class</h1></div><div class="row-actions"><input id="quiz-import-input" type="file" accept=".json,application/json" multiple hidden><button class="button secondary" data-action="import-quizzes">Import JSON</button><button class="button secondary small" data-action="logout">Sign out</button><button class="button" data-action="builder">+ New quiz</button></div></div>
-    <div id="room-live"></div><div class="dashboard-layout"><section><h2 class="section-title">Your quizzes <span class="mono muted">${state.quizzes.length}</span></h2><div class="quiz-list">${quizRows}</div></section>
+    <div id="student-join-code"></div><div id="room-live"></div><div class="dashboard-layout"><section><h2 class="section-title">Your quizzes <span class="mono muted">${state.quizzes.length}</span></h2><div class="quiz-list">${quizRows}</div></section>
     <aside class="panel"><p class="eyebrow">How it works</p><h2>One room<br>for the whole class</h2><p class="muted">Create a quiz, share its six-digit code, wait for students, then start the shared timer.</p><p class="caption">Results are saved on this computer and can be downloaded as a TXT file.</p></aside></div>`);
+  updateJoinCodeBanner();
   updateRoomPanel();
   connectTeacherSocket();
 }
 
+function updateJoinCodeBanner() {
+  const host = document.querySelector("#student-join-code");
+  if (!host) return;
+  const room = state.room;
+  const activeRoom = room && ["waiting", "running"].includes(room.status);
+  host.innerHTML = activeRoom
+    ? `<section class="student-join-banner"><div><p class="eyebrow">STUDENTS ENTER THIS ROOM CODE</p><div class="student-join-code">${escapeHtml(room.code)}</div><p class="room-meta">Students enter this code on the home page to join the quiz.</p></div><button class="button secondary" data-action="copy-room-code" data-code="${escapeHtml(room.code)}">Copy code</button></section>`
+    : `<section class="student-join-banner empty"><div><p class="eyebrow">STUDENT ROOM CODE</p><p class="room-meta">Launch a quiz to create a room code for students.</p></div></section>`;
+}
+
 function updateRoomPanel() {
   const host = document.querySelector("#room-live");
-  if (!host || !state.room) return;
+  if (!host) return;
+  updateJoinCodeBanner();
+  if (!state.room) return;
   const room = state.room;
   const people = room.participants || room.leaderboard || [];
   const statusText =
@@ -239,7 +252,7 @@ function updateRoomPanel() {
         )
         .join("")
     : `<div class="empty-state">No students have joined yet</div>`;
-  host.innerHTML = `<section class="panel room-live"><div class="room-bar"><div><p class="eyebrow">${escapeHtml(room.quiz.title)} · ${statusText}</p><div class="room-code">${escapeHtml(room.code)}</div><div class="room-meta">Participants: ${people.length} · ${room.quiz.duration_minutes} minutes</div></div><div class="row-actions">${room.status === "waiting" ? `<button class="button" data-action="start-room" data-code="${room.code}" ${people.length ? "" : "disabled"}>Start quiz →</button>` : ""}${room.status !== "finished" ? `<button class="button danger small" data-action="finish-room" data-code="${room.code}">End quiz</button>` : `<a class="button secondary small" href="/api/teacher/rooms/${room.code}/export">Download TXT ↓</a>`}</div></div><div class="participant-list">${peopleHtml}</div>${room.status === "running" ? `<h3 class="section-title" style="margin-top:24px">Live leaderboard</h3>${leaderboardHtml(room.leaderboard)}` : ""}</section>`;
+  host.innerHTML = `<section class="panel room-live"><div class="room-bar"><div><p class="eyebrow">${escapeHtml(room.quiz.title)} · ${statusText}</p><div class="room-meta">Participants: ${people.length} · ${room.quiz.duration_minutes} minutes</div></div><div class="row-actions">${room.status === "waiting" ? `<button class="button" data-action="start-room" data-code="${room.code}" ${people.length ? "" : "disabled"}>Start quiz →</button>` : ""}${room.status !== "finished" ? `<button class="button danger small" data-action="finish-room" data-code="${room.code}">End quiz</button>` : `<a class="button secondary small" href="/api/teacher/rooms/${room.code}/export">Download TXT ↓</a>`}</div></div><div class="participant-list">${peopleHtml}</div>${room.status === "running" ? `<h3 class="section-title" style="margin-top:24px">Live leaderboard</h3>${leaderboardHtml(room.leaderboard)}` : ""}</section>`;
 }
 
 function leaderboardHtml(board = []) {
@@ -616,6 +629,21 @@ document.addEventListener("click", async (event) => {
         { method: "POST" },
       );
       updateRoomPanel();
+    } else if (action === "copy-room-code") {
+      const code = button.dataset.code;
+      try {
+        await navigator.clipboard.writeText(code);
+      } catch {
+        const temporaryInput = document.createElement("textarea");
+        temporaryInput.value = code;
+        temporaryInput.style.position = "fixed";
+        temporaryInput.style.opacity = "0";
+        document.body.append(temporaryInput);
+        temporaryInput.select();
+        document.execCommand("copy");
+        temporaryInput.remove();
+      }
+      showToast("Room code copied. Share it with your students.");
     } else if (action === "fullscreen") {
       await document.documentElement.requestFullscreen?.();
       showToast("Full-screen mode is on.");

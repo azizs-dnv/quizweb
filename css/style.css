@@ -97,6 +97,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .quiz-row p { margin: 0; color: var(--muted); font-size: 12px; }
 .row-actions { display: flex; align-items: center; gap: 9px; }
 .empty-state { padding: 24px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); text-align: center; }
+.student-join-banner { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 0 0 18px; padding: 18px 22px; border: 1px solid var(--lime); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.student-join-banner .eyebrow { margin-bottom: 5px; }
+.student-join-banner .room-meta { margin: 0; }
+.student-join-banner.empty { border-color: var(--line); box-shadow: none; }
+.student-join-code { color: var(--lime); font-family: "DM Mono", monospace; font-size: 42px; line-height: 1.1; letter-spacing: 2px; }
 .room-live { margin: 24px 0; }
 .room-code { display: inline-block; margin: 5px 0 14px; color: var(--lime); font-family: "DM Mono", monospace; font-size: 54px; letter-spacing: 2px; }
 .room-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
@@ -182,6 +187,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 @media (max-width: 430px) {
     .intro h1 { font-size: 40px; }
     .form-grid { grid-template-columns: 1fr; gap: 0; }
+    .student-join-banner { align-items: flex-start; flex-direction: column; padding: 16px; }
     .quiz-row { align-items: flex-start; }
     .pair-edit-row { grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1fr) 34px; gap: 5px; }
     .pair-edit-row input { padding: 7px 6px; font-size: 13px; }
