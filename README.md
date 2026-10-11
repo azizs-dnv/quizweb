@@ -168,3 +168,9 @@ python -m unittest discover -s tests -v
 The app is intended for a trusted local network. It uses HTTP without TLS; do not expose the server port to the public internet or use it on a public or untrusted Wi-Fi network.
 
 The browser can report tab changes or loss of focus, but a web page cannot reliably detect whether Python, a code editor, or another program is open on the device. Full-screen mode also requires a student click due to browser restrictions. These features do not replace proctoring or guarantee that students cannot cheat.
+
+## License
+
+Copyright 2026 Aziz. All rights reserved except as granted by the license.
+
+This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text. This notice applies to the project materials owned by Aziz; third-party dependencies and assets remain subject to their own licenses.
