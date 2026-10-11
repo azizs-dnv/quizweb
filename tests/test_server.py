@@ -83,6 +83,59 @@ class QuizRoomFlowTest(unittest.TestCase):
         self.assertEqual(exported.status_code, 200)
         self.assertIn("Alex Morgan", exported.text)
 
+    def test_all_question_types_are_graded_and_legacy_single_choice_still_works(self):
+        self.client.post("/api/auth/login", json={"username": "teacher", "password": "correct-horse-battery"})
+        created = self.client.post("/api/teacher/quizzes", json={
+            "title": "Question type coverage",
+            "duration_minutes": 8,
+            "questions": [
+                {"text": "Choose one", "options": ["Red", "Blue"], "correct_index": 0},
+                {"type": "multiple_choice", "text": "Choose two", "options": ["A", "B", "C"], "correct_indices": [0, 2]},
+                {"type": "text", "text": "Name the planet", "expected_answer": "Saturn"},
+                {"type": "matching", "text": "Match the pairs", "pairs": [
+                    {"left": "A", "right": "4"}, {"left": "B", "right": "2"},
+                ]},
+            ],
+        })
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertNotIn("correct_indices", created.json())
+        code = self.client.post(f"/api/teacher/rooms/{created.json()['id']}").json()["code"]
+        joined = self.client.post("/api/student/join", json={"code": code, "name": "Sam Lee"}).json()
+        token = joined["student"]["token"]
+        self.client.post(f"/api/teacher/rooms/{code}/start")
+        attempt = self.client.post("/api/student/resume", json={"token": token}).json()
+
+        while "questions" in attempt:
+            question = next(item for item in attempt["questions"] if not item["answered"])
+            if question["type"] == "single_choice":
+                answer = question["options"].index("Red")
+            elif question["type"] == "multiple_choice":
+                answer = [index for index, option in enumerate(question["options"]) if option in {"A", "C"}]
+            elif question["type"] == "text":
+                answer = "  sATURN  "
+            else:
+                answer = {
+                    pair["key"]: question["match_options"].index({"A": "4", "B": "2"}[pair["left"]])
+                    for pair in question["pairs"]
+                }
+            result = self.client.post("/api/student/answer", json={
+                "token": token,
+                "question_id": question["id"],
+                "answer": answer,
+            })
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertTrue(result.json()["correct"], question["type"])
+            self.assertGreater(result.json()["points"], 0)
+            attempt = self.client.post("/api/student/resume", json={"token": token}).json()
+
+        self.assertEqual(attempt["student"]["correct_count"], 4)
+
+    def test_correct_answer_points_decrease_with_question_response_time(self):
+        fast_points = server._points_for_correct_answer(1, 60)
+        slower_points = server._points_for_correct_answer(30, 60)
+        self.assertGreater(fast_points, slower_points)
+        self.assertEqual(server._points_for_correct_answer(60, 60), 300)
+
 
 if __name__ == "__main__":
     unittest.main()

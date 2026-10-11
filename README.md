@@ -9,10 +9,10 @@ The project uses Python, FastAPI, WebSockets, SQLite, and plain HTML/CSS/JavaScr
 ## Features
 
 - Teacher sign-in with a password stored as a `scrypt` hash.
-- Create and delete quizzes with a total duration and 2–12 answer options per question.
+- Create and delete quizzes with single-choice, multiple-choice, open-text, and matching-pairs questions.
 - Waiting rooms with six-digit join codes and a live participant list.
 - A randomized question and answer-option order for each student.
-- A shared room timer, speed-based points, a live leaderboard, and grades from 0 to 10.
+- A shared room timer, per-question speed points, a live leaderboard, and grades from 0 to 10.
 - Server-side attempt saving and resume after a page refresh.
 - Focus-loss warnings; a second recorded warning ends the attempt early.
 - Downloadable TXT results.
@@ -98,6 +98,15 @@ Press `Ctrl+C` in the terminal to stop the server. To start it again, activate `
 7. Monitor participant statuses and the leaderboard. Download the TXT results when the quiz ends.
 
 Students select **Student** on the home page, then enter their name and the room code. The teacher must start the room before the quiz begins. If a student refreshes the page, select **Resume** on the home page to continue; saved answers and points remain on the server.
+
+### Question types and scoring
+
+- **Single choice:** the student selects one option. Existing quizzes without a `type` field continue to work as single-choice quizzes.
+- **Multiple choice:** the student selects every correct option. The answer is marked correct only when the selected set exactly matches the answer key.
+- **Open text:** the teacher enters an expected answer. Automatic checking ignores letter case and repeated or leading/trailing spaces, but otherwise requires an exact match.
+- **Matching pairs:** the teacher creates 2–12 unique pairs. Each student receives a randomized left and right column and must match every item correctly.
+
+Incorrect answers earn 0 points. A correct answer earns from 300 to 1,000 points based on how quickly it is submitted after that question appears. The expected response window is the total quiz duration divided by the number of questions; answering faster earns more points. The overall quiz timer remains shared, with no separate per-question deadline.
 
 ## Connect students over Wi-Fi/LAN
 

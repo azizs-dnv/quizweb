@@ -5,7 +5,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import random
 import secrets
 import sqlite3
@@ -50,7 +49,8 @@ class JoinBody(BaseModel):
 class AnswerBody(BaseModel):
     token: str
     question_id: str
-    option_index: int
+    answer: Any = None
+    option_index: int | None = None
 
 
 class TokenBody(BaseModel):
@@ -94,6 +94,7 @@ def _init_database() -> None:
                 question_order TEXT NOT NULL,
                 option_orders TEXT NOT NULL,
                 answers TEXT NOT NULL DEFAULT '{}',
+                question_times TEXT NOT NULL DEFAULT '{}',
                 score INTEGER NOT NULL DEFAULT 0,
                 correct_count INTEGER NOT NULL DEFAULT 0,
                 warnings INTEGER NOT NULL DEFAULT 0,
@@ -105,6 +106,13 @@ def _init_database() -> None:
             );
             """
         )
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(participants)").fetchall()
+        }
+        if "question_times" not in columns:
+            connection.execute(
+                "ALTER TABLE participants ADD COLUMN question_times TEXT NOT NULL DEFAULT '{}'"
+            )
 
 
 _init_database()
@@ -172,6 +180,69 @@ def _public_quiz(quiz: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in quiz.items() if key != "questions"} | {
         "question_count": len(quiz["questions"])
     }
+
+
+QUESTION_TYPES = {"single_choice", "multiple_choice", "text", "matching"}
+
+
+def _question_type(question: dict[str, Any]) -> str:
+    return question.get("type", "single_choice")
+
+
+def _normalise_text(value: str) -> str:
+    return " ".join(value.strip().casefold().split())
+
+
+def _points_for_correct_answer(elapsed_seconds: float, expected_seconds: float) -> int:
+    speed_ratio = max(0.0, min(1.0, 1 - elapsed_seconds / max(1.0, expected_seconds)))
+    return round(300 + 700 * speed_ratio)
+
+
+def _evaluate_answer(
+    question: dict[str, Any], submitted: Any, option_order: list[int] | dict[str, list[int]]
+) -> tuple[bool, Any]:
+    question_type = _question_type(question)
+    if question_type == "single_choice":
+        if type(submitted) is not int or not 0 <= submitted < len(option_order):
+            raise HTTPException(status_code=400, detail="Choose one valid answer option.")
+        selected = option_order[submitted]
+        return selected == question["correct_index"], selected
+
+    if question_type == "multiple_choice":
+        if (
+            not isinstance(submitted, list)
+            or not submitted
+            or any(type(index) is not int or not 0 <= index < len(option_order) for index in submitted)
+            or len(set(submitted)) != len(submitted)
+        ):
+            raise HTTPException(status_code=400, detail="Choose one or more valid answer options.")
+        selected = sorted(option_order[index] for index in submitted)
+        return set(selected) == set(question["correct_indices"]), selected
+
+    if question_type == "text":
+        if not isinstance(submitted, str) or not submitted.strip() or len(submitted) > 1000:
+            raise HTTPException(status_code=400, detail="Enter a text answer up to 1,000 characters.")
+        answer = submitted.strip()
+        return _normalise_text(answer) == _normalise_text(question["expected_answer"]), answer
+
+    if question_type == "matching":
+        pairs = question["pairs"]
+        right_order = option_order["right"]
+        expected_keys = {str(index) for index in range(len(pairs))}
+        if (
+            not isinstance(submitted, dict)
+            or set(submitted) != expected_keys
+            or any(type(index) is not int or not 0 <= index < len(right_order) for index in submitted.values())
+            or len(set(submitted.values())) != len(pairs)
+        ):
+            raise HTTPException(status_code=400, detail="Match every item with a unique answer.")
+        selected = {
+            int(left_index): right_order[display_index]
+            for left_index, display_index in submitted.items()
+        }
+        return all(left_index == right_index for left_index, right_index in selected.items()), selected
+
+    raise HTTPException(status_code=400, detail="Unsupported question type.")
 
 
 def _room_row(code: str) -> sqlite3.Row:
@@ -244,6 +315,19 @@ def _room_state(code: str, token: str | None = None) -> dict[str, Any]:
         if student is None:
             raise HTTPException(status_code=404, detail="Participant not found.")
         connection.execute("UPDATE participants SET last_seen = ? WHERE token = ?", (time.time(), token))
+        answers = json.loads(student["answers"])
+        question_times = json.loads(student["question_times"])
+        if room["status"] == "running" and student["status"] == "in_progress":
+            active_question = next(
+                (question_id for question_id in json.loads(student["question_order"]) if question_id not in answers),
+                None,
+            )
+            if active_question and active_question not in question_times:
+                question_times[active_question] = time.time()
+                connection.execute(
+                    "UPDATE participants SET question_times = ? WHERE token = ?",
+                    (json.dumps(question_times), token),
+                )
         ranked_tokens = connection.execute(
             "SELECT token FROM participants WHERE room_code = ? ORDER BY score DESC, correct_count DESC, joined_at ASC",
             (code,),
@@ -251,7 +335,6 @@ def _room_state(code: str, token: str | None = None) -> dict[str, Any]:
 
     order = json.loads(student["question_order"])
     option_orders = json.loads(student["option_orders"])
-    answers = json.loads(student["answers"])
     result["student"] = {
         "name": student["name"],
         "token": token,
@@ -267,22 +350,25 @@ def _room_state(code: str, token: str | None = None) -> dict[str, Any]:
         questions_by_id = {question["id"]: question for question in quiz["questions"]}
         for question_id in order:
             question = questions_by_id[question_id]
-            options = option_orders[question_id]
-            ordered_questions.append(
-                {
-                    "id": question_id,
-                    "text": question["text"],
-                    "options": [question["options"][index] for index in options],
-                    "answered": question_id in answers,
-                }
-            )
+            question_type = _question_type(question)
+            item = {
+                "id": question_id,
+                "type": question_type,
+                "text": question["text"],
+                "answered": question_id in answers,
+            }
+            if question_type in {"single_choice", "multiple_choice"}:
+                item["options"] = [question["options"][index] for index in option_orders[question_id]]
+            elif question_type == "matching":
+                orders = option_orders[question_id]
+                item["pairs"] = [
+                    {"key": index, "left": question["pairs"][index]["left"]}
+                    for index in orders["left"]
+                ]
+                item["match_options"] = [question["pairs"][index]["right"] for index in orders["right"]]
+            ordered_questions.append(item)
         result["questions"] = ordered_questions
     return result
-
-
-@app.on_event("startup")
-def startup() -> None:
-    _init_database()
 
 
 @app.get("/")
@@ -353,13 +439,58 @@ def create_quiz(body: QuizBody, request: Request) -> dict[str, Any]:
     questions = []
     for position, item in enumerate(body.questions, start=1):
         text = str(item.get("text", "")).strip()
-        options = [str(option).strip() for option in item.get("options", [])]
-        correct_index = item.get("correct_index")
-        if not text or len(text) > 1000 or not 2 <= len(options) <= 12 or any(not option for option in options):
-            raise HTTPException(status_code=422, detail=f"Check the question text and answer options for question {position}.")
-        if not isinstance(correct_index, int) or not 0 <= correct_index < len(options):
-            raise HTTPException(status_code=422, detail=f"Select the correct answer for question {position}.")
-        questions.append({"id": secrets.token_hex(6), "text": text, "options": options, "correct_index": correct_index})
+        question_type = item.get("type", "single_choice")
+        if question_type not in QUESTION_TYPES:
+            raise HTTPException(status_code=422, detail=f"Unsupported question type for question {position}.")
+        if not text or len(text) > 1000:
+            raise HTTPException(status_code=422, detail=f"Enter a question up to 1,000 characters for question {position}.")
+        question = {"id": secrets.token_hex(6), "type": question_type, "text": text}
+        if question_type in {"single_choice", "multiple_choice"}:
+            raw_options = item.get("options", [])
+            if not isinstance(raw_options, list):
+                raise HTTPException(status_code=422, detail=f"Answer options must be a list for question {position}.")
+            options = [str(option).strip() for option in raw_options]
+            if not 2 <= len(options) <= 12 or any(not option for option in options):
+                raise HTTPException(status_code=422, detail=f"Add 2 to 12 non-empty options for question {position}.")
+            question["options"] = options
+            if question_type == "single_choice":
+                correct_index = item.get("correct_index")
+                if type(correct_index) is not int or not 0 <= correct_index < len(options):
+                    raise HTTPException(status_code=422, detail=f"Select one correct answer for question {position}.")
+                question["correct_index"] = correct_index
+            else:
+                correct_indices = item.get("correct_indices")
+                if (
+                    not isinstance(correct_indices, list)
+                    or not correct_indices
+                    or any(type(index) is not int or not 0 <= index < len(options) for index in correct_indices)
+                    or len(set(correct_indices)) != len(correct_indices)
+                ):
+                    raise HTTPException(status_code=422, detail=f"Select one or more correct options for question {position}.")
+                question["correct_indices"] = correct_indices
+        elif question_type == "text":
+            expected_answer = str(item.get("expected_answer", "")).strip()
+            if not expected_answer or len(expected_answer) > 1000:
+                raise HTTPException(status_code=422, detail=f"Enter the expected text answer for question {position}.")
+            question["expected_answer"] = expected_answer
+        else:
+            raw_pairs = item.get("pairs", [])
+            if not isinstance(raw_pairs, list) or not 2 <= len(raw_pairs) <= 12:
+                raise HTTPException(status_code=422, detail=f"Add 2 to 12 matching pairs for question {position}.")
+            pairs = [
+                {"left": str(pair.get("left", "")).strip(), "right": str(pair.get("right", "")).strip()}
+                for pair in raw_pairs
+                if isinstance(pair, dict)
+            ]
+            if len(pairs) != len(raw_pairs) or any(not pair["left"] or not pair["right"] for pair in pairs):
+                raise HTTPException(status_code=422, detail=f"Fill in both sides of every pair for question {position}.")
+            if (
+                len({_normalise_text(pair["left"]) for pair in pairs}) != len(pairs)
+                or len({_normalise_text(pair["right"]) for pair in pairs}) != len(pairs)
+            ):
+                raise HTTPException(status_code=422, detail=f"Matching items must be unique on each side for question {position}.")
+            question["pairs"] = pairs
+        questions.append(question)
     quiz = {
         "id": secrets.token_hex(8),
         "title": title,
@@ -430,9 +561,19 @@ def join_room(body: JoinBody) -> dict[str, Any]:
     random.SystemRandom().shuffle(question_order)
     option_orders = {}
     for question in questions:
-        indices = list(range(len(question["options"])))
-        random.SystemRandom().shuffle(indices)
-        option_orders[question["id"]] = indices
+        question_type = _question_type(question)
+        if question_type == "matching":
+            left_order = list(range(len(question["pairs"])))
+            right_order = left_order.copy()
+            random.SystemRandom().shuffle(left_order)
+            random.SystemRandom().shuffle(right_order)
+            option_orders[question["id"]] = {"left": left_order, "right": right_order}
+        elif question_type == "text":
+            option_orders[question["id"]] = []
+        else:
+            indices = list(range(len(question["options"])))
+            random.SystemRandom().shuffle(indices)
+            option_orders[question["id"]] = indices
     token = secrets.token_urlsafe(32)
     now = time.time()
     with _database() as connection:
@@ -466,18 +607,27 @@ def submit_answer(body: AnswerBody) -> dict[str, Any]:
         question = next((item for item in quiz["questions"] if item["id"] == body.question_id), None)
         if question is None or body.question_id not in json.loads(student["question_order"]):
             raise HTTPException(status_code=400, detail="Unknown question.")
-        option_order = json.loads(student["option_orders"])[body.question_id]
-        if not 0 <= body.option_index < len(option_order):
-            raise HTTPException(status_code=400, detail="Unknown answer option.")
         answers = json.loads(student["answers"])
         if body.question_id in answers:
             raise HTTPException(status_code=409, detail="An answer for this question has already been saved.")
-        selected_index = option_order[body.option_index]
-        correct = selected_index == question["correct_index"]
-        elapsed = time.time() - room["started_at"]
-        speed_ratio = max(0.0, min(1.0, 1 - elapsed / (quiz["duration_minutes"] * 60)))
-        earned = round(1000 * (0.3 + 0.7 * speed_ratio)) if correct else 0
-        answers[body.question_id] = {"option_index": selected_index, "correct": correct, "points": earned}
+        active_question = next(
+            (question_id for question_id in json.loads(student["question_order"]) if question_id not in answers),
+            None,
+        )
+        if body.question_id != active_question:
+            raise HTTPException(status_code=409, detail="Answer the active question first.")
+        submitted = body.answer if body.answer is not None else body.option_index
+        if submitted is None:
+            raise HTTPException(status_code=400, detail="An answer is required.")
+        option_order = json.loads(student["option_orders"])[body.question_id]
+        correct, saved_answer = _evaluate_answer(question, submitted, option_order)
+        now = time.time()
+        question_times = json.loads(student["question_times"])
+        answered_at = question_times.get(body.question_id, now)
+        expected_seconds = quiz["duration_minutes"] * 60 / len(quiz["questions"])
+        earned = _points_for_correct_answer(now - answered_at, expected_seconds) if correct else 0
+        answers[body.question_id] = {"answer": saved_answer, "correct": correct, "points": earned}
+        question_times.pop(body.question_id, None)
         next_correct_count = student["correct_count"] + int(correct)
         next_status = student["status"]
         next_finished = student["finished_at"]
@@ -485,8 +635,8 @@ def submit_answer(body: AnswerBody) -> dict[str, Any]:
             next_status = "completed"
             next_finished = time.time()
         connection.execute(
-            "UPDATE participants SET answers = ?, score = score + ?, correct_count = ?, status = ?, finished_at = ?, last_seen = ? WHERE token = ?",
-            (json.dumps(answers), earned, next_correct_count, next_status, next_finished, time.time(), body.token),
+            "UPDATE participants SET answers = ?, question_times = ?, score = score + ?, correct_count = ?, status = ?, finished_at = ?, last_seen = ? WHERE token = ?",
+            (json.dumps(answers), json.dumps(question_times), earned, next_correct_count, next_status, next_finished, now, body.token),
         )
     return {"correct": correct, "points": earned, "score": student["score"] + earned, "finished": next_status == "completed"}
 

@@ -95,15 +95,81 @@ function renderHome(message = "") {
   </section><p class="footer-note">Local quizzes · quick answers · live leaderboard</p>`);
 }
 
-function questionEditor(number, options = ["", ""]) {
+function choiceOptionRow(questionId, index, type, value = "") {
+  const control = type === "multiple_choice" ? "checkbox" : "radio";
+  const checked = type === "single_choice" && index === 0 ? "checked" : "";
+  return `<div class="option-edit-row"><input type="${control}" name="correct-${questionId}" value="${index}" ${checked} aria-label="Correct answer"><input type="text" class="option-text" maxlength="300" placeholder="Option ${index + 1}" value="${escapeHtml(value)}" required><button class="mini-icon" type="button" data-action="remove-option" title="Remove option" aria-label="Remove option">×</button></div>`;
+}
+
+function matchingPairRow(left = "", right = "", number = 1) {
+  return `<div class="pair-edit-row"><span class="pair-number">${number}</span><input type="text" class="match-left" maxlength="300" placeholder="Left item ${number}" value="${escapeHtml(left)}" required><input type="text" class="match-right" maxlength="300" placeholder="Match ${number}" value="${escapeHtml(right)}" required><button class="mini-icon" type="button" data-action="remove-pair" title="Remove pair" aria-label="Remove pair">×</button></div>`;
+}
+
+function questionTypeFields(questionId, type = "single_choice", options = ["", ""], pairs = [{ left: "", right: "" }, { left: "", right: "" }]) {
+  if (type === "text") {
+    return `<div class="field"><label>Expected answer</label><input class="input expected-answer" maxlength="1000" placeholder="Enter the accepted answer" required><p class="caption">Answers are checked automatically, ignoring case and extra spaces.</p></div>`;
+  }
+  if (type === "matching") {
+    return `<span class="field-label">Create 2–12 unique pairs to match</span><div class="pair-editor">${pairs.map((pair, index) => matchingPairRow(pair.left, pair.right, index + 1)).join("")}</div><button class="link-button" type="button" data-action="add-pair">+ Add pair</button>`;
+  }
+  const guidance = type === "multiple_choice" ? "Select every correct option" : "Mark the one correct answer";
+  return `<span class="field-label">Answer options · ${guidance.toLowerCase()}</span><div class="option-editor">${options.map((value, index) => choiceOptionRow(questionId, index, type, value)).join("")}</div><button class="link-button add-option" type="button" data-action="add-option">+ Add option</button>`;
+}
+
+function questionEditor(number) {
   const questionId = `q-${crypto.randomUUID()}`;
   return `<article class="question-card" data-question-id="${questionId}">
     <div class="question-top"><strong>QUESTION ${number}</strong><button class="mini-icon" type="button" data-action="remove-question" title="Remove question" aria-label="Remove question">×</button></div>
     <div class="field"><label>Question</label><textarea class="textarea question-text" maxlength="1000" placeholder="Enter a question" required></textarea></div>
-    <span class="field-label">Answer options · mark the correct one</span><div class="option-editor">
-      ${options.map((value, index) => `<div class="option-edit-row"><input type="radio" name="correct-${questionId}" value="${index}" ${index === 0 ? "checked" : ""} aria-label="Correct answer"><input type="text" class="option-text" maxlength="300" placeholder="Option ${index + 1}" value="${escapeHtml(value)}" required><button class="mini-icon" type="button" data-action="remove-option" title="Remove option" aria-label="Remove option">×</button></div>`).join("")}
-    </div><button class="link-button add-option" type="button" data-action="add-option">+ Add option</button>
+    <div class="field"><label>Question type</label><select class="select question-type"><option value="single_choice">Single choice</option><option value="multiple_choice">Multiple choice</option><option value="text">Open text</option><option value="matching">Matching pairs</option></select></div>
+    <div class="type-fields">${questionTypeFields(questionId)}</div>
   </article>`;
+}
+
+function studentAnswerControls(question) {
+  if (question.type === "text") {
+    return `<form class="student-answer-form" id="text-answer-form" data-question-id="${escapeHtml(question.id)}"><div class="field"><label for="student-text-answer">Your answer</label><input class="input" id="student-text-answer" name="answer" maxlength="1000" autocomplete="off" required></div><button class="button" type="submit">Submit answer →</button></form>`;
+  }
+  if (question.type === "multiple_choice") {
+    return `<form class="student-answer-form" id="multiple-answer-form" data-question-id="${escapeHtml(question.id)}"><div class="answer-grid">${question.options.map((option, index) => `<label class="answer-option multi-answer-option"><input type="checkbox" name="option" value="${index}"><span>${escapeHtml(option)}</span></label>`).join("")}</div><button class="button" type="submit">Submit answers →</button></form>`;
+  }
+  if (question.type === "matching") {
+    return `<form class="student-answer-form" id="matching-answer-form" data-question-id="${escapeHtml(question.id)}"><div class="matching-answer-list">${question.pairs.map((pair) => `<label class="matching-answer-row"><span>${escapeHtml(pair.left)}</span><select class="select matching-select" data-left-key="${pair.key}" required><option value="">Choose a match</option>${question.match_options.map((option, index) => `<option value="${index}">${escapeHtml(option)}</option>`).join("")}</select></label>`).join("")}</div><button class="button" type="submit">Check matches →</button></form>`;
+  }
+  return `<div class="answer-grid">${question.options.map((option, index) => `<button class="answer-option" data-action="answer" data-question="${escapeHtml(question.id)}" data-option="${index}">${escapeHtml(option)}</button>`).join("")}</div>`;
+}
+
+async function submitStudentAnswer(questionId, answer) {
+  const controls = document.querySelectorAll(".student-answer-form button, .answer-option");
+  controls.forEach((control) => { control.disabled = true; });
+  try {
+    const token = state.student.token;
+    const result = await api("/api/student/answer", {
+      method: "POST",
+      body: { token, question_id: questionId, answer },
+    });
+    const feedback = document.querySelector("#answer-feedback");
+    if (feedback) {
+      feedback.className = `answer-feedback ${result.correct ? "good" : "bad"}`;
+      feedback.textContent = result.correct
+        ? `Correct · +${result.points} points`
+        : "Not quite. Your answer is saved.";
+    }
+    setTimeout(async () => {
+      try {
+        const room = await api("/api/student/resume", {
+          method: "POST",
+          body: { token },
+        });
+        loadStudentRoom(room, room.student);
+      } catch (error) {
+        showToast(error.message);
+      }
+    }, 850);
+  } catch (error) {
+    controls.forEach((control) => { control.disabled = false; });
+    throw error;
+  }
 }
 
 function renderBuilder() {
@@ -298,7 +364,7 @@ function renderStudentRoom() {
   }
   const number = questions.findIndex((item) => item.id === question.id) + 1;
   app.innerHTML = shell(
-    `<div class="student-top"><div class="student-progress"><span class="mono">${number} / ${questions.length}</span><div class="progress-track"><div class="progress-fill" style="width:${(answered.size / questions.length) * 100}%"></div></div></div><div class="timer" id="countdown">--:--</div></div><section class="student-stage"><span class="question-kicker">${escapeHtml(room.quiz.title)} · ${escapeHtml(student.name)}</span><h1>${escapeHtml(question.text)}</h1><div class="answer-grid">${question.options.map((option, index) => `<button class="answer-option" data-action="answer" data-question="${escapeHtml(question.id)}" data-option="${index}">${escapeHtml(option)}</button>`).join("")}</div><div class="answer-feedback" id="answer-feedback"></div></section>`,
+    `<div class="student-top"><div class="student-progress"><span class="mono">${number} / ${questions.length}</span><div class="progress-track"><div class="progress-fill" style="width:${(answered.size / questions.length) * 100}%"></div></div></div><div class="timer" id="countdown">--:--</div></div><section class="student-stage"><span class="question-kicker">${escapeHtml(room.quiz.title)} · ${escapeHtml(student.name)}</span><h1>${escapeHtml(question.text)}</h1>${studentAnswerControls(question)}<div class="answer-feedback" id="answer-feedback"></div></section>`,
   );
   updateTimer();
   connectStudentSocket();
@@ -389,6 +455,16 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("blur", flagFocusLoss);
 
+document.addEventListener("change", (event) => {
+  const selector = event.target.closest(".question-type");
+  if (!selector) return;
+  const card = selector.closest(".question-card");
+  card.querySelector(".type-fields").innerHTML = questionTypeFields(
+    card.dataset.questionId,
+    selector.value,
+  );
+});
+
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
@@ -438,22 +514,35 @@ document.addEventListener("click", async (event) => {
       if (list.children.length >= 12)
         return showToast("You can add up to 12 answer options.");
       const index = list.children.length;
-      const questionId = card.dataset.questionId;
       list.insertAdjacentHTML(
         "beforeend",
-        `<div class="option-edit-row"><input type="radio" name="correct-${questionId}" value="${index}" aria-label="Correct answer"><input type="text" class="option-text" maxlength="300" placeholder="Option ${index + 1}" required><button class="mini-icon" type="button" data-action="remove-option" title="Remove option" aria-label="Remove option">×</button></div>`,
+        choiceOptionRow(card.dataset.questionId, index, card.querySelector(".question-type").value),
       );
     } else if (action === "remove-option") {
       const list = button.closest(".option-editor");
       if (list.children.length <= 2)
         return showToast("Each question needs at least two answer options.");
-      const wasChecked =
-        button.parentElement.querySelector("input[type=radio]").checked;
       button.parentElement.remove();
       [...list.children].forEach((row, index) => {
-        row.querySelector("input[type=radio]").value = index;
+        row.querySelector("input[type=radio], input[type=checkbox]").value = index;
       });
-      if (wasChecked) list.querySelector("input[type=radio]").checked = true;
+      const correctControl = list.querySelector("input[type=radio], input[type=checkbox]");
+      if (correctControl.type === "radio" && !list.querySelector("input[type=radio]:checked"))
+        correctControl.checked = true;
+    } else if (action === "add-pair") {
+      const list = button.previousElementSibling;
+      if (list.children.length >= 12) return showToast("You can add up to 12 matching pairs.");
+      list.insertAdjacentHTML("beforeend", matchingPairRow("", "", list.children.length + 1));
+    } else if (action === "remove-pair") {
+      const list = button.closest(".pair-editor");
+      if (list.children.length <= 2) return showToast("Add at least two matching pairs.");
+      button.closest(".pair-edit-row").remove();
+      [...list.children].forEach((row, index) => {
+        const number = index + 1;
+        row.querySelector(".pair-number").textContent = number;
+        row.querySelector(".match-left").placeholder = `Left item ${number}`;
+        row.querySelector(".match-right").placeholder = `Match ${number}`;
+      });
     } else if (action === "create-room") {
       state.room = await api(`/api/teacher/rooms/${button.dataset.id}`, {
         method: "POST",
@@ -486,35 +575,7 @@ document.addEventListener("click", async (event) => {
       await document.documentElement.requestFullscreen?.();
       showToast("Full-screen mode is on.");
     } else if (action === "answer") {
-      document.querySelectorAll(".answer-option").forEach((option) => {
-        option.disabled = true;
-      });
-      const result = await api("/api/student/answer", {
-        method: "POST",
-        body: {
-          token: state.student.token,
-          question_id: button.dataset.question,
-          option_index: Number(button.dataset.option),
-        },
-      });
-      const feedback = document.querySelector("#answer-feedback");
-      if (feedback) {
-        feedback.className = `answer-feedback ${result.correct ? "good" : "bad"}`;
-        feedback.textContent = result.correct
-          ? `Correct · +${result.points} points`
-          : "Not quite. Your answer is saved.";
-      }
-      setTimeout(async () => {
-        try {
-          const room = await api("/api/student/resume", {
-            method: "POST",
-            body: { token: state.student.token },
-          });
-          loadStudentRoom(room, room.student);
-        } catch (error) {
-          showToast(error.message);
-        }
-      }, 850);
+      await submitStudentAnswer(button.dataset.question, Number(button.dataset.option));
     }
   } catch (error) {
     showToast(error.message);
@@ -531,7 +592,22 @@ document.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
   try {
-    if (form.id === "join-form") {
+    if (form.id === "multiple-answer-form") {
+      const selected = [...form.querySelectorAll("input[name=option]:checked")]
+        .map((input) => Number(input.value));
+      if (!selected.length) return showToast("Select at least one answer.");
+      await submitStudentAnswer(form.dataset.questionId, selected);
+    } else if (form.id === "text-answer-form") {
+      await submitStudentAnswer(form.dataset.questionId, form.elements.answer.value);
+    } else if (form.id === "matching-answer-form") {
+      const matches = Object.fromEntries(
+        [...form.querySelectorAll(".matching-select")].map((select) => [
+          select.dataset.leftKey,
+          Number(select.value),
+        ]),
+      );
+      await submitStudentAnswer(form.dataset.questionId, matches);
+    } else if (form.id === "join-form") {
       const body = Object.fromEntries(new FormData(form));
       const room = await api("/api/student/join", { method: "POST", body });
       loadStudentRoom(room, room.student);
@@ -544,17 +620,30 @@ document.addEventListener("submit", async (event) => {
       sessionStorage.setItem("teacherToken", result.token);
       await loadTeacher();
     } else if (form.id === "quiz-form") {
-      const questions = [...document.querySelectorAll(".question-card")].map(
-        (card) => ({
+      const questions = [...document.querySelectorAll(".question-card")].map((card) => {
+        const type = card.querySelector(".question-type").value;
+        const question = {
+          type,
           text: card.querySelector(".question-text").value.trim(),
-          options: [...card.querySelectorAll(".option-text")].map((input) =>
-            input.value.trim(),
-          ),
-          correct_index: Number(
-            card.querySelector("input[type=radio]:checked")?.value ?? -1,
-          ),
-        }),
-      );
+        };
+        if (type === "text") {
+          question.expected_answer = card.querySelector(".expected-answer").value.trim();
+        } else if (type === "matching") {
+          question.pairs = [...card.querySelectorAll(".pair-edit-row")].map((row) => ({
+            left: row.querySelector(".match-left").value.trim(),
+            right: row.querySelector(".match-right").value.trim(),
+          }));
+        } else {
+          question.options = [...card.querySelectorAll(".option-text")].map((input) => input.value.trim());
+          if (type === "multiple_choice") {
+            question.correct_indices = [...card.querySelectorAll("input[type=checkbox]:checked")]
+              .map((input) => Number(input.value));
+          } else {
+            question.correct_index = Number(card.querySelector("input[type=radio]:checked")?.value ?? -1);
+          }
+        }
+        return question;
+      });
       const quiz = await api("/api/teacher/quizzes", {
         method: "POST",
         body: {
