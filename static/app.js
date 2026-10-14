@@ -28,6 +28,46 @@ const escapeHtml = (value = "") =>
       })[char],
   );
 
+function renderQuestionText(text = "") {
+  const source = String(text).replace(/\r\n?/g, "\n");
+  const codeFence = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let output = "";
+  let cursor = 0;
+  let match;
+
+  const renderCode = (code, language = "") => {
+    const normalizedLanguage = language.trim().toLowerCase();
+    const languageClass = window.hljs?.getLanguage(normalizedLanguage)
+      ? ` class="language-${escapeHtml(normalizedLanguage)}"`
+      : "";
+    return `<pre class="question-code"><code${languageClass}>${escapeHtml(code)}</code></pre>`;
+  };
+  const renderPlain = (value) => {
+    const lines = value.trim().split("\n");
+    const assignment = /^\s*(?:[A-Za-z_$][\w$]*\s*(?:=|:=)\s*.+|(?:#|\/\/).+|(?:print|return|console\.log)\s*\(.*\))\s*;?\s*$/;
+    if (value.trim() && lines.every((line) => assignment.test(line))) {
+      return renderCode(value.trim());
+    }
+    return value
+      .split(/(`[^`\n]+`)/g)
+      .map((part) => {
+        if (part.startsWith("`") && part.endsWith("`")) {
+          return `<code class="inline-code">${escapeHtml(part.slice(1, -1))}</code>`;
+        }
+        return escapeHtml(part).replace(/\n/g, "<br>");
+      })
+      .join("");
+  };
+
+  while ((match = codeFence.exec(source))) {
+    output += renderPlain(source.slice(cursor, match.index));
+    output += renderCode(match[2].replace(/\n$/, ""), match[1]);
+    cursor = codeFence.lastIndex;
+  }
+  output += renderPlain(source.slice(cursor));
+  return output;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -136,7 +176,7 @@ function questionEditor(number, question = null) {
     : options.map((value, index) => choiceOptionRow(questionId, index, type, value, index === question?.correct_index)).join("");
   return `<article class="question-card" data-question-id="${questionId}">
     <div class="question-top"><strong>QUESTION ${number}</strong><button class="mini-icon" type="button" data-action="remove-question" title="Remove question" aria-label="Remove question">×</button></div>
-    <div class="field"><label>Question</label><textarea class="textarea question-text" maxlength="1000" placeholder="Enter a question" required>${escapeHtml(question?.text || "")}</textarea></div>
+    <div class="field"><label>Question</label><textarea class="textarea question-text" maxlength="1000" placeholder="Enter a question or paste code" required>${escapeHtml(question?.text || "")}</textarea><p class="caption">Line breaks are kept. For code inside a description, wrap it with triple backticks and a language, for example python.</p></div>
     <div class="field"><label>Question type</label><select class="select question-type"><option value="single_choice" ${type === "single_choice" ? "selected" : ""}>Single choice</option><option value="multiple_choice" ${type === "multiple_choice" ? "selected" : ""}>Multiple choice</option><option value="text" ${type === "text" ? "selected" : ""}>Open text</option><option value="matching" ${type === "matching" ? "selected" : ""}>Matching pairs</option></select></div>
     <div class="type-fields">${questionTypeFields(questionId, type, options, pairs, question, optionRows)}</div>
   </article>`;
@@ -410,8 +450,13 @@ function renderStudentRoom() {
   }
   const number = questions.findIndex((item) => item.id === question.id) + 1;
   app.innerHTML = shell(
-    `<div class="student-top"><div class="student-progress"><span class="mono">${number} / ${questions.length}</span><div class="progress-track"><div class="progress-fill" style="width:${(answered.size / questions.length) * 100}%"></div></div></div><div class="timer" id="countdown">--:--</div></div><section class="student-stage"><span class="question-kicker">${escapeHtml(room.quiz.title)} · ${escapeHtml(student.name)}</span><h1>${escapeHtml(question.text)}</h1>${studentAnswerControls(question)}<div class="answer-feedback" id="answer-feedback"></div></section>`,
+    `<div class="student-top"><div class="student-progress"><span class="mono">${number} / ${questions.length}</span><div class="progress-track"><div class="progress-fill" style="width:${(answered.size / questions.length) * 100}%"></div></div></div><div class="timer" id="countdown">--:--</div></div><section class="student-stage"><span class="question-kicker">${escapeHtml(room.quiz.title)} · ${escapeHtml(student.name)}</span><div class="question-prompt" role="heading" aria-level="1">${renderQuestionText(question.text)}</div>${studentAnswerControls(question)}<div class="answer-feedback" id="answer-feedback"></div></section>`,
   );
+  if (window.hljs) {
+    document.querySelectorAll(".question-code code").forEach((code) => {
+      window.hljs.highlightElement(code);
+    });
+  }
   updateTimer();
   connectStudentSocket();
 }

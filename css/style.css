@@ -138,7 +138,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .timer { color: var(--lime); font-family: "DM Mono", monospace; font-size: 20px; white-space: nowrap; }
 .student-stage { max-width: 760px; margin: 4vh auto 0; }
 .question-kicker { color: var(--muted); font-family: "DM Mono", monospace; font-size: 12px; }
-.student-stage h1 { margin: 15px 0 28px; font-size: 42px; line-height: 1.22; letter-spacing: 0; }
+.question-prompt { margin: 15px 0 28px; font-size: 42px; font-weight: 800; line-height: 1.22; overflow-wrap: anywhere; }
+.question-code { max-width: 100%; margin: 18px 0; padding: 16px 18px; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--surface-raised); text-align: left; font: 500 15px/1.7 "DM Mono", monospace; }
+.question-code code { white-space: pre; }
+.inline-code { padding: 2px 6px; border-radius: 4px; color: var(--blue); background: var(--surface-raised); font: 500 .82em "DM Mono", monospace; }
+.question-code .hljs-keyword, .question-code .hljs-built_in, .question-code .hljs-title.function_ { color: var(--blue); }
+.question-code .hljs-string, .question-code .hljs-comment, .question-code .hljs-quote { color: var(--lime); }
+.question-code .hljs-number, .question-code .hljs-literal, .question-code .hljs-title.class_ { color: var(--coral); }
+.question-code .hljs-operator, .question-code .hljs-punctuation { color: var(--muted); }
 .answer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .answer-option { min-height: 84px; padding: 17px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: var(--surface); text-align: left; font-size: 16px; font-weight: 700; cursor: pointer; transition: transform .16s ease, border-color .16s ease, background .16s ease; }
 .answer-option:hover { transform: translateY(-2px); border-color: var(--lime); background: var(--surface-raised); }
@@ -173,7 +180,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
     .intro h1 { font-size: 48px; }
     .dashboard-head h1, .room-heading h1 { font-size: 34px; }
     .room-code { font-size: 42px; }
-    .student-stage h1 { font-size: 32px; }
+    .question-prompt { font-size: 32px; }
     .lobby-center h1, .result-center h1 { font-size: 36px; }
     .result-score { font-size: 52px; }
     .intro-copy { margin-top: 15px; font-size: 14px; }

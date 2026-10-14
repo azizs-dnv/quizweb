@@ -108,6 +108,7 @@ Students select **Student** on the home page, then enter their name and the room
 - **Single choice:** the student selects one option. Existing quizzes without a `type` field continue to work as single-choice quizzes.
 - **Multiple choice:** the student selects every correct option. The answer is marked correct only when the selected set exactly matches the answer key.
 - **Open text:** the teacher enters an expected answer. Automatic checking ignores letter case and repeated or leading/trailing spaces, but otherwise requires an exact match.
+- **Question formatting:** line breaks are preserved, and standalone code assignments are highlighted automatically. For code inside a description, use a fenced block with a language name, such as ` ```python ` on its own line, then the code, then ` ``` ` on its own line.
 - **Matching pairs:** the teacher creates 2–12 unique pairs. Each student receives a randomized left and right column and must match every item correctly.
 
 Incorrect answers earn 0 points. A correct answer earns from 300 to 1,000 points based on how quickly it is submitted after that question appears. The expected response window is the total quiz duration divided by the number of questions; answering faster earns more points. Late joiners receive an additional multiplier based on the fraction of total quiz time remaining when they join. The overall quiz timer remains shared, with no separate per-question deadline.
