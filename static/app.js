@@ -313,6 +313,9 @@ function connectStudentSocket() {
   socket.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.type !== "student") return;
+    const previousRoomStatus = state.room?.status;
+    const previousStudentStatus = state.student?.status;
+    const previousAnswers = JSON.stringify(state.student?.answers || []);
     state.room = data.room;
     state.serverOffset = data.room.server_time - Date.now() / 1000;
     state.student = data.room.student;
@@ -320,7 +323,20 @@ function connectStudentSocket() {
       "quizroomAttempt",
       JSON.stringify({ token: state.student.token, code: state.room.code }),
     );
-    renderStudentRoom();
+    const answersChanged = previousAnswers !== JSON.stringify(state.student.answers || []);
+    const answerPending = document.querySelector(
+      ".student-answer-form button:disabled, .answer-option:disabled",
+    );
+    if (
+      state.page !== "student-room" ||
+      previousRoomStatus !== state.room.status ||
+      previousStudentStatus !== state.student.status ||
+      (answersChanged && !answerPending)
+    ) {
+      renderStudentRoom();
+    } else {
+      updateTimer();
+    }
   };
   socket.onclose = () => {
     if (state.page === "student-room") setTimeout(connectStudentSocket, 1800);
