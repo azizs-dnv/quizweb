@@ -514,9 +514,6 @@ def login(body: LoginBody):
 
 @app.post("/api/auth/register", status_code=201)
 def register_teacher(body: RegisterBody):
-    root_auth = _read_auth()
-    if not root_auth:
-        raise HTTPException(status_code=409, detail="Run init_admin.py to create the first teacher account.")
     username = body.username.strip()
     if not 3 <= len(username) <= 80:
         raise HTTPException(status_code=422, detail="Username must contain between 3 and 80 characters.")
@@ -526,7 +523,7 @@ def register_teacher(body: RegisterBody):
     with _REGISTRATION_LOCK:
         if _account_for_username(username):
             raise HTTPException(status_code=409, detail="That username is already in use.")
-        teacher_id = secrets.token_hex(12)
+        root_auth = _read_auth()
         salt = secrets.token_bytes(16)
         account = {
             "username": username,
@@ -534,18 +531,30 @@ def register_teacher(body: RegisterBody):
             "password_hash": hashlib.scrypt(
                 body.password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32
             ).hex(),
-            "created_at": time.time(),
         }
-        account_directory = TEACHER_DATA_DIR / teacher_id
-        account_directory.mkdir(parents=True, exist_ok=False)
-        account_file = account_directory / "account.json"
-        temporary_file = account_directory / "account.tmp"
-        temporary_file.write_text(json.dumps(account, indent=2), encoding="utf-8")
-        try:
-            temporary_file.chmod(0o600)
-        except OSError:
-            pass
-        temporary_file.replace(account_file)
+        if root_auth is None:
+            root_auth = account | {"token_secret": secrets.token_hex(32)}
+            temporary_file = AUTH_FILE.with_suffix(".tmp")
+            temporary_file.write_text(json.dumps(root_auth, indent=2), encoding="utf-8")
+            try:
+                temporary_file.chmod(0o600)
+            except OSError:
+                pass
+            temporary_file.replace(AUTH_FILE)
+            teacher_id = DEFAULT_TEACHER_ID
+        else:
+            teacher_id = secrets.token_hex(12)
+            account["created_at"] = time.time()
+            account_directory = TEACHER_DATA_DIR / teacher_id
+            account_directory.mkdir(parents=True, exist_ok=False)
+            account_file = account_directory / "account.json"
+            temporary_file = account_directory / "account.tmp"
+            temporary_file.write_text(json.dumps(account, indent=2), encoding="utf-8")
+            try:
+                temporary_file.chmod(0o600)
+            except OSError:
+                pass
+            temporary_file.replace(account_file)
 
     token = _sign_session(root_auth["token_secret"], teacher_id)
     result = JSONResponse(

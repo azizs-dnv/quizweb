@@ -88,8 +88,8 @@ function renderHome(message = "") {
     <div class="field"><label for="username">Teacher username</label><input class="input" id="username" name="username" autocomplete="username" required></div>
     <div class="field"><label for="password">Password</label><input class="input" id="password" type="password" name="password" autocomplete="current-password" required></div>
     <div class="form-error">${escapeHtml(message)}</div><button class="button" type="submit">Sign in <span aria-hidden="true">→</span></button>
-    <p class="caption">First time here? Create an account with <span class="mono">python init_admin.py</span>.</p>
-    <button class="link-button" type="button" data-action="auth-mode" data-mode="register">Create a separate teacher account</button>
+    <p class="caption">First time here? Create your teacher account here or run <span class="mono">python init_admin.py</span>.</p>
+    <button class="link-button" type="button" data-action="auth-mode" data-mode="register">Create a teacher account</button>
   </form>`;
   const registerForm = `<form id="register-form">
     <div class="field"><label for="new-username">Teacher username</label><input class="input" id="new-username" name="username" minlength="3" maxlength="80" autocomplete="username" required></div>
@@ -483,7 +483,10 @@ function flagFocusLoss() {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) flagFocusLoss();
 });
-window.addEventListener("blur", flagFocusLoss);
+window.addEventListener("blur", () => {
+  if (document.activeElement instanceof HTMLSelectElement) return;
+  flagFocusLoss();
+});
 
 document.addEventListener("change", (event) => {
   if (event.target.id === "quiz-import-input") {

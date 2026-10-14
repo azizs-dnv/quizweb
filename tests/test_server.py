@@ -281,6 +281,22 @@ class QuizRoomFlowTest(unittest.TestCase):
         default_quizzes = self.client.get("/api/teacher/quizzes").json()
         self.assertEqual([quiz["title"] for quiz in default_quizzes], ["Default teacher quiz"])
 
+    def test_first_teacher_can_register_without_init_admin(self):
+        self.auth_file.unlink()
+
+        registered = self.client.post("/api/auth/register", json={
+            "username": "first-teacher",
+            "password": "first-secure-password",
+        })
+        self.assertEqual(registered.status_code, 201, registered.text)
+        self.assertTrue(self.auth_file.exists())
+
+        logged_in = self.client.post("/api/auth/login", json={
+            "username": "first-teacher",
+            "password": "first-secure-password",
+        })
+        self.assertEqual(logged_in.status_code, 200, logged_in.text)
+
     def test_import_edit_and_active_room_lock(self):
         self.client.post("/api/auth/login", json={"username": "teacher", "password": "correct-horse-battery"})
         imported = self.client.post("/api/teacher/quizzes/import", json={"quizzes": [
