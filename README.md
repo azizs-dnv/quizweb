@@ -89,6 +89,8 @@ After the server starts, the terminal reports that it is listening on port `8000
 http://127.0.0.1:8000
 ```
 
+The startup message also shows the local network address for students, for example `http://192.168.1.25:8000`. Students should use that address from a device connected to the same Wi-Fi/LAN, then enter the room code provided by the teacher. The server listens on `0.0.0.0` so it can accept connections on the local network; this is a bind address, not an address to open in a browser.
+
 Press `Ctrl+C` in the terminal to stop the server. To start it again, activate `.venv` and run `python server.py`.
 
 ## Run a quiz

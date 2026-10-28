@@ -8,6 +8,7 @@ import json
 import random
 import secrets
 import sqlite3
+import socket
 import sys
 import threading
 import time
@@ -583,41 +584,27 @@ def _write_quiz(quiz: dict[str, Any], teacher_id: str) -> None:
     temporary.replace(path)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+def _local_network_ip() -> str | None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+            connection.connect(("192.0.2.1", 80))
+            address = connection.getsockname()[0]
+    except OSError:
+        return None
+    return address if not address.startswith("127.") else None
 
 
 if __name__ == "__main__":
     import uvicorn
+
+    print("QuizRoom запускается.")
+    print("Для учителя на этом компьютере: http://127.0.0.1:8000")
+    network_ip = _local_network_ip()
+    if network_ip:
+        print(f"Для учеников в той же сети Wi-Fi/LAN: http://{network_ip}:8000")
+    else:
+        print("Не удалось определить адрес локальной сети для учеников.")
+        print("Проверьте подключение к Wi-Fi/LAN и найдите локальный IPv4-адрес компьютера.")
+    print("Адрес 0.0.0.0 — адрес прослушивания сервера; открывать его в браузере не нужно.")
 
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)

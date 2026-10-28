@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -334,6 +334,21 @@ class QuizRoomFlowTest(unittest.TestCase):
         self.client.post(f"/api/teacher/rooms/{room.json()['code']}/finish")
         editable_again = self.client.put(f"/api/teacher/quizzes/{quiz_id}", json=update_body)
         self.assertEqual(editable_again.status_code, 200, editable_again.text)
+
+
+class StartupAddressTest(unittest.TestCase):
+    def test_local_network_ip_returns_address_for_students(self):
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.getsockname.return_value = ("192.168.1.25", 0)
+        with patch.object(server.socket, "socket", return_value=connection):
+            self.assertEqual(server._local_network_ip(), "192.168.1.25")
+
+    def test_local_network_ip_returns_none_when_network_is_unavailable(self):
+        with patch.object(
+            server.socket, "socket", side_effect=OSError("Network unavailable")
+        ):
+            self.assertIsNone(server._local_network_ip())
 
 
 if __name__ == "__main__":
