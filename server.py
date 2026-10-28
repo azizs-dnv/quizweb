@@ -410,6 +410,9 @@ def _room_state(code: str, token: str | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {
         "code": code,
         "status": room["status"],
+        "results_final": room["status"] == "finished"
+        or bool(board)
+        and all(participant["status"] in {"completed", "blocked"} for participant in board),
         "quiz": _public_quiz(quiz),
         "deadline": room["deadline"],
         "server_time": time.time(),

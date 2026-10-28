@@ -11,6 +11,7 @@ const state = {
   socket: null,
   warningAt: 0,
   timer: null,
+  resultPoll: null,
   socketToken: null,
   serverOffset: 0,
 };
@@ -319,11 +320,55 @@ function updateStudentResult() {
   document.querySelector("#student-result-warnings").textContent =
     `Warnings: ${student.warnings}`;
   document.querySelector("#student-result-live-status").textContent =
-    room.status === "finished"
+    room.results_final
       ? "Final class results."
-      : "Results update live as classmates finish.";
+      : "Live points — final places appear when everyone finishes.";
+  document.querySelector("#student-result-podium").innerHTML =
+    room.results_final
+      ? room.leaderboard
+          .slice(0, 3)
+          .map(
+            (person) =>
+              `<p>${person.rank}. ${escapeHtml(person.name)} — ${person.score} pts</p>`,
+          )
+          .join("")
+      : "";
   document.querySelector("#student-result-leaderboard").innerHTML =
     leaderboardHtml(room.leaderboard);
+}
+
+function startStudentResultPolling(token) {
+  clearInterval(state.resultPoll);
+  let requestPending = false;
+  const refresh = async () => {
+    if (
+      requestPending ||
+      state.page !== "student-result" ||
+      state.student?.token !== token
+    )
+      return;
+    requestPending = true;
+    try {
+      const room = await api("/api/student/resume", {
+        method: "POST",
+        body: { token },
+      });
+      if (state.page !== "student-result" || state.student?.token !== token)
+        return;
+      state.room = room;
+      state.student = room.student;
+      updateStudentResult();
+      if (room.status === "finished") closeSocketForRender();
+    } catch (error) {
+      const status = document.querySelector("#student-result-live-status");
+      if (status)
+        status.textContent = `Connection interrupted; retrying results update. ${error.message}`;
+    } finally {
+      requestPending = false;
+    }
+  };
+  refresh();
+  state.resultPoll = setInterval(refresh, 1000);
 }
 
 function closeSocket() {
@@ -335,6 +380,8 @@ function closeSocket() {
   state.socketToken = null;
   clearInterval(state.timer);
   state.timer = null;
+  clearInterval(state.resultPoll);
+  state.resultPoll = null;
 }
 
 function connectTeacherSocket() {
@@ -459,11 +506,15 @@ function renderStudentRoom() {
     const title =
       student.status === "blocked" ? "Attempt ended early" : "Quiz complete";
     app.innerHTML = shell(
-      `<section class="result-center"><p class="eyebrow">${escapeHtml(room.quiz.title)}</p><h1>${title}, ${escapeHtml(student.name)}.</h1><div class="result-score" id="student-result-score"></div><div class="result-stats"><span class="stat-chip" id="student-result-rank"></span><span class="stat-chip" id="student-result-correct"></span><span class="stat-chip" id="student-result-grade"></span><span class="stat-chip" id="student-result-warnings"></span></div><p class="muted" id="student-result-live-status"></p><h2 class="section-title">Class leaderboard</h2><div id="student-result-leaderboard"></div><button class="button secondary" data-action="home">Home</button></section>`,
+      `<section class="result-center"><p class="eyebrow">${escapeHtml(room.quiz.title)}</p><h1>${title}, ${escapeHtml(student.name)}.</h1><div class="result-score" id="student-result-score"></div><div class="result-stats"><span class="stat-chip" id="student-result-rank"></span><span class="stat-chip" id="student-result-correct"></span><span class="stat-chip" id="student-result-grade"></span><span class="stat-chip" id="student-result-warnings"></span></div><p class="muted" id="student-result-live-status"></p><div id="student-result-podium"></div><h2 class="section-title">Class leaderboard</h2><div id="student-result-leaderboard"></div><button class="button secondary" data-action="home">Home</button></section>`,
     );
     updateStudentResult();
-    if (room.status === "finished") closeSocketForRender();
-    else connectStudentSocket();
+    if (room.status === "finished") {
+      closeSocketForRender();
+    } else {
+      connectStudentSocket();
+      startStudentResultPolling(student.token);
+    }
     return;
   }
   state.page = "student-room";
@@ -498,6 +549,8 @@ function closeSocketForRender() {
   }
   clearInterval(state.timer);
   state.timer = null;
+  clearInterval(state.resultPoll);
+  state.resultPoll = null;
 }
 
 async function loadTeacher() {

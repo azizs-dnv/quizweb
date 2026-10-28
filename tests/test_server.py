@@ -125,6 +125,19 @@ class QuizRoomFlowTest(unittest.TestCase):
             },
         ).json()
         self.assertTrue(first_answer["finished"])
+        first_live_result = self.client.post(
+            "/api/student/resume", json={"token": first_student["token"]}
+        ).json()
+        self.assertEqual(first_live_result["status"], "running")
+        self.assertFalse(first_live_result["results_final"])
+        self.assertEqual(
+            next(
+                person["score"]
+                for person in first_live_result["leaderboard"]
+                if person["name"] == "Second Student"
+            ),
+            0,
+        )
 
         second_attempt = self.client.post(
             "/api/student/resume", json={"token": second_student["token"]}
@@ -144,6 +157,7 @@ class QuizRoomFlowTest(unittest.TestCase):
             "/api/student/resume", json={"token": first_student["token"]}
         ).json()
         self.assertEqual(refreshed_result["status"], "running")
+        self.assertTrue(refreshed_result["results_final"])
         self.assertEqual(refreshed_result["student"]["score"], first_answer["score"])
         self.assertEqual(
             {person["name"] for person in refreshed_result["leaderboard"]},
@@ -156,6 +170,10 @@ class QuizRoomFlowTest(unittest.TestCase):
                 if person["name"] == "Second Student"
             ),
             second_answer["score"],
+        )
+        self.assertEqual(
+            [person["rank"] for person in refreshed_result["leaderboard"]],
+            [1, 2],
         )
 
     def test_all_question_types_are_graded_and_legacy_single_choice_still_works(self):
@@ -252,6 +270,11 @@ class QuizRoomFlowTest(unittest.TestCase):
             "question_id": early_question["id"],
             "option_index": early_question["options"].index("A"),
         }).json()
+        early_results = self.client.post(
+            "/api/student/resume",
+            json={"token": early_student["student"]["token"]},
+        ).json()
+        self.assertTrue(early_results["results_final"])
 
         late_start = time.time() - 300
         with server._database() as connection:
@@ -262,6 +285,7 @@ class QuizRoomFlowTest(unittest.TestCase):
         late_student = self.client.post("/api/student/join", json={"code": code, "name": "Late Student"})
         self.assertEqual(late_student.status_code, 201, late_student.text)
         self.assertEqual(late_student.json()["student"]["status"], "in_progress")
+        self.assertFalse(late_student.json()["results_final"])
         late_attempt = self.client.post(
             "/api/student/resume", json={"token": late_student.json()["student"]["token"]}
         ).json()
