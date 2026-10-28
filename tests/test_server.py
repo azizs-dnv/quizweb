@@ -88,6 +88,76 @@ class QuizRoomFlowTest(unittest.TestCase):
         self.assertEqual(exported.status_code, 200)
         self.assertIn("Alex Morgan", exported.text)
 
+    def test_completed_student_receives_updated_class_leaderboard(self):
+        self.client.post(
+            "/api/auth/login",
+            json={"username": "teacher", "password": "correct-horse-battery"},
+        )
+        quiz = self.client.post(
+            "/api/teacher/quizzes",
+            json={
+                "title": "Live results",
+                "duration_minutes": 5,
+                "questions": [
+                    {"text": "Choose A", "options": ["A", "B"], "correct_index": 0}
+                ],
+            },
+        ).json()
+        code = self.client.post(f"/api/teacher/rooms/{quiz['id']}").json()["code"]
+        first_student = self.client.post(
+            "/api/student/join", json={"code": code, "name": "First Student"}
+        ).json()["student"]
+        second_student = self.client.post(
+            "/api/student/join", json={"code": code, "name": "Second Student"}
+        ).json()["student"]
+        self.client.post(f"/api/teacher/rooms/{code}/start")
+
+        first_attempt = self.client.post(
+            "/api/student/resume", json={"token": first_student["token"]}
+        ).json()
+        first_question = first_attempt["questions"][0]
+        first_answer = self.client.post(
+            "/api/student/answer",
+            json={
+                "token": first_student["token"],
+                "question_id": first_question["id"],
+                "option_index": first_question["options"].index("A"),
+            },
+        ).json()
+        self.assertTrue(first_answer["finished"])
+
+        second_attempt = self.client.post(
+            "/api/student/resume", json={"token": second_student["token"]}
+        ).json()
+        second_question = second_attempt["questions"][0]
+        second_answer = self.client.post(
+            "/api/student/answer",
+            json={
+                "token": second_student["token"],
+                "question_id": second_question["id"],
+                "option_index": second_question["options"].index("A"),
+            },
+        ).json()
+        self.assertTrue(second_answer["finished"])
+
+        refreshed_result = self.client.post(
+            "/api/student/resume", json={"token": first_student["token"]}
+        ).json()
+        self.assertEqual(refreshed_result["status"], "running")
+        self.assertEqual(refreshed_result["student"]["score"], first_answer["score"])
+        self.assertEqual(
+            {person["name"] for person in refreshed_result["leaderboard"]},
+            {"First Student", "Second Student"},
+        )
+        self.assertEqual(
+            next(
+                person["score"]
+                for person in refreshed_result["leaderboard"]
+                if person["name"] == "Second Student"
+            ),
+            second_answer["score"],
+        )
+
     def test_all_question_types_are_graded_and_legacy_single_choice_still_works(self):
         self.client.post("/api/auth/login", json={"username": "teacher", "password": "correct-horse-battery"})
         created = self.client.post("/api/teacher/quizzes", json={

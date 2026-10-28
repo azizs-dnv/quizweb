@@ -301,6 +301,31 @@ function leaderboardHtml(board = []) {
   return `<div class="leaderboard">${board.map((person) => `<div class="leaderboard-row"><span class="leaderboard-rank">#${person.rank}</span><strong>${escapeHtml(person.name)}</strong><span class="mono">${person.score} · ${person.grade}/10</span></div>`).join("")}</div>`;
 }
 
+function updateStudentResult() {
+  if (!state.room || !state.student || state.page !== "student-result") return;
+  const { room, student } = { room: state.room, student: state.student };
+  const score = document.querySelector("#student-result-score");
+  if (!score) return;
+  score.innerHTML = `${student.score} <span style="font-size:20px">points</span>`;
+  document.querySelector("#student-result-rank").textContent =
+    `Place: #${student.rank || "—"}`;
+  document.querySelector("#student-result-correct").textContent =
+    `Correct: ${student.correct_count} of ${room.quiz.question_count}`;
+  const grade = room.quiz.question_count
+    ? ((student.correct_count / room.quiz.question_count) * 10).toFixed(1)
+    : "0";
+  document.querySelector("#student-result-grade").textContent =
+    `Grade: ${grade} / 10`;
+  document.querySelector("#student-result-warnings").textContent =
+    `Warnings: ${student.warnings}`;
+  document.querySelector("#student-result-live-status").textContent =
+    room.status === "finished"
+      ? "Final class results."
+      : "Results update live as classmates finish.";
+  document.querySelector("#student-result-leaderboard").innerHTML =
+    leaderboardHtml(room.leaderboard);
+}
+
 function closeSocket() {
   if (state.socket) {
     state.socket.onclose = null;
@@ -363,6 +388,11 @@ function connectStudentSocket() {
       "quizroomAttempt",
       JSON.stringify({ token: state.student.token, code: state.room.code }),
     );
+    if (state.page === "student-result") {
+      updateStudentResult();
+      if (state.room.status === "finished") closeSocketForRender();
+      return;
+    }
     const answersChanged = previousAnswers !== JSON.stringify(state.student.answers || []);
     const answerPending = document.querySelector(
       ".student-answer-form button:disabled, .answer-option:disabled",
@@ -379,7 +409,11 @@ function connectStudentSocket() {
     }
   };
   socket.onclose = () => {
-    if (state.page === "student-room") setTimeout(connectStudentSocket, 1800);
+    if (
+      state.page === "student-room" ||
+      (state.page === "student-result" && state.room?.status !== "finished")
+    )
+      setTimeout(connectStudentSocket, 1800);
   };
   state.timer = setInterval(() => {
     if (state.page === "student-room") updateTimer();
@@ -422,19 +456,14 @@ function renderStudentRoom() {
     student.status === "blocked"
   ) {
     state.page = "student-result";
-    closeSocketForRender();
-    const rank =
-      student.rank ||
-      room.leaderboard.find((item) => item.name === student.name)?.rank ||
-      "—";
-    const grade = room.quiz.question_count
-      ? ((student.correct_count / room.quiz.question_count) * 10).toFixed(1)
-      : "0";
     const title =
       student.status === "blocked" ? "Attempt ended early" : "Quiz complete";
     app.innerHTML = shell(
-      `<section class="result-center"><p class="eyebrow">${escapeHtml(room.quiz.title)}</p><h1>${title}, ${escapeHtml(student.name)}.</h1><div class="result-score">${student.score} <span style="font-size:20px">points</span></div><div class="result-stats"><span class="stat-chip">Place: #${rank}</span><span class="stat-chip">Correct: ${student.correct_count} of ${room.quiz.question_count}</span><span class="stat-chip">Grade: ${grade} / 10</span><span class="stat-chip">Warnings: ${student.warnings}</span></div><h2 class="section-title">Class leaderboard</h2>${leaderboardHtml(room.leaderboard)}<button class="button secondary" data-action="home">Home</button></section>`,
+      `<section class="result-center"><p class="eyebrow">${escapeHtml(room.quiz.title)}</p><h1>${title}, ${escapeHtml(student.name)}.</h1><div class="result-score" id="student-result-score"></div><div class="result-stats"><span class="stat-chip" id="student-result-rank"></span><span class="stat-chip" id="student-result-correct"></span><span class="stat-chip" id="student-result-grade"></span><span class="stat-chip" id="student-result-warnings"></span></div><p class="muted" id="student-result-live-status"></p><h2 class="section-title">Class leaderboard</h2><div id="student-result-leaderboard"></div><button class="button secondary" data-action="home">Home</button></section>`,
     );
+    updateStudentResult();
+    if (room.status === "finished") closeSocketForRender();
+    else connectStudentSocket();
     return;
   }
   state.page = "student-room";
