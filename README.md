@@ -4,6 +4,8 @@ QuizRoom is a local classroom quiz system. The teacher runs the server on their 
 
 The project uses Python, FastAPI, WebSockets, SQLite, and plain HTML/CSS/JavaScript. No frontend build step is required.
 
+The server entry point is `server.py`. API endpoints are grouped in `routes/auth.py`, `routes/quizzes.py`, and `routes/rooms.py`; shared database, authentication, and quiz logic stays in `server.py`.
+
 > GitHub stores the project source code but does not run this server. GitHub Pages cannot host QuizRoom; the app needs an always-on teacher computer or a separately configured Python server.
 
 ## Features
